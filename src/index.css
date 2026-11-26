@@ -1,0 +1,287 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --brand-purple: #522D60;
+    --brand-purple-hover: #40234c;
+    --brand-purple-light: #f5f0f7;
+  }
+
+  body {
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    background-color: #fafafa;
+    color: #111827;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    overflow-x: hidden;
+  }
+}
+
+/* Custom subtle scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #e2e8f0;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #cbd5e1;
+}
+
+/* Hide scrollbars cleanly on smartphone & touch devices without wildcard selector overhead */
+@media (max-width: 768px) {
+  html, body, .no-scrollbar {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  html::-webkit-scrollbar,
+  body::-webkit-scrollbar,
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+    width: 0;
+    height: 0;
+  }
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+/* Prevent iOS Safari auto-zoom when focusing inputs/selects/textareas */
+@media (max-width: 767px), (pointer: coarse) {
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+}
+
+@keyframes ai-led-rotate {
+  0% {
+    transform: translate(-50%, -50%) rotate(0deg);
+  }
+  100% {
+    transform: translate(-50%, -50%) rotate(360deg);
+  }
+}
+
+.ai-led-conic {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 900px;
+  height: 900px;
+  background: conic-gradient(
+    from 0deg,
+    #e4e4e7 0deg,
+    #ffffff 22deg,
+    #d4d4d8 42deg,
+    #71717a 75deg,
+    #27272a 105deg,
+    #a1a1aa 135deg,
+    #ffffff 160deg,
+    #cbd5e1 185deg,
+    #52525b 220deg,
+    #f4f4f5 250deg,
+    #ffffff 272deg,
+    #9ca3af 305deg,
+    #3f3f46 335deg,
+    #e4e4e7 360deg
+  );
+  transform: translate(-50%, -50%) rotate(0deg);
+  animation: ai-led-rotate 4.5s linear infinite;
+  will-change: transform;
+}
+
+.ai-led-conic-fast {
+  animation-duration: 1.65s;
+}
+
+@keyframes ai-liquid-sweep {
+  0% {
+    transform: translate3d(-105%, 0, 0);
+  }
+  100% {
+    transform: translate3d(105%, 0, 0);
+  }
+}
+
+@keyframes ai-liquid-orb-a {
+  0% {
+    transform: translate3d(-18%, -12%, 0) scale(0.95);
+    opacity: 0.45;
+  }
+  50% {
+    transform: translate3d(26%, 10%, 0) scale(1.12);
+    opacity: 0.78;
+  }
+  100% {
+    transform: translate3d(58%, -8%, 0) scale(0.98);
+    opacity: 0.5;
+  }
+}
+
+@keyframes ai-liquid-orb-b {
+  0% {
+    transform: translate3d(55%, 14%, 0) scale(1.05);
+    opacity: 0.4;
+  }
+  50% {
+    transform: translate3d(8%, -14%, 0) scale(0.92);
+    opacity: 0.72;
+  }
+  100% {
+    transform: translate3d(-24%, 8%, 0) scale(1.08);
+    opacity: 0.45;
+  }
+}
+
+@keyframes ai-orbital-spin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes ai-status-breathe {
+  0%, 100% {
+    opacity: 0.68;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.ai-liquid-sweep {
+  background: linear-gradient(
+    108deg,
+    rgba(255, 255, 255, 0) 14%,
+    rgba(228, 228, 231, 0.45) 34%,
+    rgba(255, 255, 255, 0.96) 50%,
+    rgba(212, 212, 216, 0.5) 64%,
+    rgba(255, 255, 255, 0) 86%
+  );
+  animation: ai-liquid-sweep 2.1s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
+  will-change: transform;
+}
+
+.ai-liquid-sweep-secondary {
+  background: linear-gradient(
+    108deg,
+    rgba(255, 255, 255, 0) 20%,
+    rgba(244, 244, 245, 0.75) 45%,
+    rgba(161, 161, 170, 0.16) 55%,
+    rgba(255, 255, 255, 0) 82%
+  );
+  animation: ai-liquid-sweep 2.75s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  animation-delay: -1.1s;
+  will-change: transform;
+}
+
+.ai-liquid-orb-a {
+  background: radial-gradient(
+    circle at center,
+    rgba(228, 228, 231, 0.65) 0%,
+    rgba(244, 244, 245, 0.35) 45%,
+    rgba(255, 255, 255, 0) 75%
+  );
+  animation: ai-liquid-orb-a 3.8s ease-in-out infinite alternate;
+  will-change: transform, opacity;
+}
+
+.ai-liquid-orb-b {
+  background: radial-gradient(
+    circle at center,
+    rgba(212, 212, 216, 0.48) 0%,
+    rgba(244, 244, 245, 0.3) 48%,
+    rgba(255, 255, 255, 0) 76%
+  );
+  animation: ai-liquid-orb-b 4.4s ease-in-out infinite alternate;
+  will-change: transform, opacity;
+}
+
+.ai-liquid-shimmer-card {
+  background: linear-gradient(
+    105deg,
+    rgba(255, 255, 255, 0) 18%,
+    rgba(244, 244, 245, 0.85) 44%,
+    rgba(228, 228, 231, 0.45) 52%,
+    rgba(255, 255, 255, 0) 82%
+  );
+  animation: ai-liquid-sweep 2.1s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
+  will-change: transform;
+}
+
+.ai-orbital-ring {
+  animation: ai-orbital-spin 1.15s cubic-bezier(0.4, 0.15, 0.6, 0.85) infinite;
+  will-change: transform;
+}
+
+.ai-status-breathe {
+  animation: ai-status-breathe 2s ease-in-out infinite;
+  will-change: opacity;
+}
+
+@keyframes aroos-chat-shake {
+  0%, 72%, 100% {
+    transform: translate3d(0, 0, 0) rotate(0deg);
+  }
+  75% {
+    transform: translate3d(-2px, 0, 0) rotate(-3deg);
+  }
+  79% {
+    transform: translate3d(2px, 0, 0) rotate(3deg);
+  }
+  83% {
+    transform: translate3d(-2px, 0, 0) rotate(-2.5deg);
+  }
+  87% {
+    transform: translate3d(2px, 0, 0) rotate(2.5deg);
+  }
+  91% {
+    transform: translate3d(-1px, 0, 0) rotate(-1.5deg);
+  }
+  95% {
+    transform: translate3d(1px, 0, 0) rotate(1.5deg);
+  }
+}
+
+.aroos-chat-shake {
+  animation: aroos-chat-shake 2.4s cubic-bezier(0.36, 0.07, 0.19, 0.97) infinite;
+  will-change: transform;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-led-conic,
+  .ai-led-conic-fast,
+  .ai-liquid-sweep,
+  .ai-liquid-sweep-secondary,
+  .ai-liquid-orb-a,
+  .ai-liquid-orb-b,
+  .ai-liquid-shimmer-card,
+  .ai-orbital-ring,
+  .ai-status-breathe {
+    animation-duration: 12s;
+  }
+  .aroos-chat-shake {
+    animation: none;
+  }
+}
+

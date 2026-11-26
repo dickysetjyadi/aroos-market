@@ -1,0 +1,6 @@
+{
+  "name": "Nura - Marketplace Fashion Lokal 0% Admin",
+  "description": "Marketplace & seller platform khusus brand fashion lokal Indonesia dengan sistem langganan bulanan tanpa potongan biaya transaksi, integrasi stok medsos, barcode scanning, dan analitik penjualan komprehensif.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

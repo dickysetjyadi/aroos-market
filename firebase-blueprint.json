@@ -1,0 +1,380 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile record for registered buyers and UMKM brand sellers",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique user ID matching Firebase Auth UID or generated user ID",
+          "maxLength": 128
+        },
+        "name": {
+          "type": "string",
+          "description": "Full legal or display name of user",
+          "maxLength": 80
+        },
+        "phone": {
+          "type": "string",
+          "description": "Phone number used for OTP SMS verification",
+          "maxLength": 25
+        },
+        "email": {
+          "type": "string",
+          "description": "Email address of user",
+          "maxLength": 100
+        },
+        "city": {
+          "type": "string",
+          "description": "City of residence or brand origin",
+          "maxLength": 50
+        },
+        "roles": {
+          "type": "array",
+          "description": "List of user roles such as buyer and seller"
+        },
+        "activeRole": {
+          "type": "string",
+          "enum": ["buyer", "seller"],
+          "description": "Currently active role"
+        },
+        "accountStatus": {
+          "type": "string",
+          "enum": ["active", "blocked", "banned"],
+          "description": "Moderation status enforced on login and active sessions"
+        },
+        "statusReason": {
+          "type": "string",
+          "maxLength": 300,
+          "description": "Optional reason for block or ban"
+        },
+        "statusUpdatedAt": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "ISO timestamp when moderation status changed"
+        },
+        "phoneVerified": {
+          "type": "boolean",
+          "description": "Flag indicating whether phone number was validated via SMS OTP"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Timestamp when account was created"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Timestamp when account was last updated"
+        }
+      },
+      "required": ["id", "name", "email", "roles", "activeRole"]
+    },
+    "EmailRegistry": {
+      "title": "EmailRegistry",
+      "description": "Uniqueness index mapping SHA-256 normalized email keys to owning user IDs without exposing email PII",
+      "type": "object",
+      "properties": {
+        "emailKey": {
+          "type": "string",
+          "description": "64-character lowercase SHA-256 hex digest of normalized email",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]+$"
+        },
+        "userId": {
+          "type": "string",
+          "description": "User ID that claimed this email address",
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO timestamp when email key was claimed",
+          "maxLength": 64
+        }
+      },
+      "required": ["emailKey", "userId", "createdAt"]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "Fashion catalog item created and managed by UMKM sellers",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 200 },
+        "brand": { "type": "string", "maxLength": 100 },
+        "itemBrand": { "type": "string", "maxLength": 100 },
+        "brandCity": { "type": "string", "maxLength": 80 },
+        "category": { "type": "string", "maxLength": 80 },
+        "subCategory": { "type": "string", "maxLength": 80 },
+        "gender": { "type": "string", "enum": ["Pria", "Wanita", "Unisex"] },
+        "fit": { "type": "string", "maxLength": 80 },
+        "condition": { "type": "string", "enum": ["Baru", "Pre-loved"] },
+        "listingStatus": { "type": "string", "enum": ["available", "reserved", "sold"] },
+        "reservedByUserId": { "type": "string", "maxLength": 128 },
+        "reservedByUserName": { "type": "string", "maxLength": 100 },
+        "likesCount": { "type": "number" },
+        "sizes": { "type": "array" },
+        "colors": { "type": "array" },
+        "price": { "type": "number" },
+        "stock": { "type": "number" },
+        "sku": { "type": "string", "maxLength": 80 },
+        "barcode": { "type": "string", "maxLength": 80 },
+        "image": { "type": "string", "maxLength": 760000 },
+        "images": { "type": "array" },
+        "description": { "type": "string", "maxLength": 4000 },
+        "material": { "type": "string", "maxLength": 200 },
+        "sellerId": { "type": "string", "maxLength": 128 },
+        "isActive": { "type": "boolean" },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "name", "brand", "price", "stock", "category"]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "Direct chat deal order linking buyer and seller with tracking status",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "orderNumber": { "type": "string", "maxLength": 64 },
+        "buyerId": { "type": "string", "maxLength": 128 },
+        "buyerName": { "type": "string", "maxLength": 100 },
+        "buyerEmail": { "type": "string", "maxLength": 120 },
+        "sellerId": { "type": "string", "maxLength": 128 },
+        "sellerBrandName": { "type": "string", "maxLength": 100 },
+        "customerName": { "type": "string", "maxLength": 100 },
+        "customerPhone": { "type": "string", "maxLength": 30 },
+        "customerCity": { "type": "string", "maxLength": 80 },
+        "customerAddress": { "type": "string", "maxLength": 400 },
+        "items": { "type": "array" },
+        "totalAmount": { "type": "number" },
+        "shippingFee": { "type": "number" },
+        "courier": { "type": "string", "maxLength": 100 },
+        "paymentMethod": {
+          "type": "string",
+          "enum": ["chat_direct", "cod", "transfer_langsung", "qris", "bca_va", "mandiri_va", "bri_va", "bni_va", "gopay", "ovo", "dana", "shopeepay"]
+        },
+        "paymentStatus": { "type": "string", "enum": ["paid", "pending"] },
+        "orderStatus": { "type": "string", "enum": ["menunggu_pembayaran", "diproses", "dikirim", "selesai"] },
+        "buyerConfirmedAt": { "type": "string", "maxLength": 64 },
+        "negotiatedFromOffer": { "type": "boolean" },
+        "trackingNumber": { "type": "string", "maxLength": 100 },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "createdAtIso": { "type": "string", "maxLength": 64 }
+      },
+      "required": [
+        "id", "orderNumber", "customerName", "customerPhone", "customerCity",
+        "customerAddress", "items", "totalAmount", "shippingFee", "courier",
+        "paymentMethod", "paymentStatus", "orderStatus", "trackingNumber", "createdAt"
+      ]
+    },
+    "Review": {
+      "title": "Review",
+      "description": "Buyer product review synced across devices",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "productId": { "type": "string", "maxLength": 128 },
+        "author": { "type": "string", "maxLength": 100 },
+        "city": { "type": "string", "maxLength": 80 },
+        "rating": { "type": "number" },
+        "comment": { "type": "string", "maxLength": 1500 },
+        "sizePurchased": { "type": "string", "maxLength": 40 },
+        "fitFeedback": { "type": "string", "enum": ["Pas", "Agak Kecil", "Agak Longgar"] },
+        "verifiedPurchase": { "type": "boolean" },
+        "date": { "type": "string", "maxLength": 64 },
+        "helpfulCount": { "type": "number" },
+        "images": { "type": "array" },
+        "userStats": { "type": "string", "maxLength": 100 },
+        "createdAtIso": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "productId", "author", "city", "rating", "comment", "fitFeedback", "verifiedPurchase", "date", "helpfulCount"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "Real-time notification targeted to a specific buyer or seller user account",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "type": { "type": "string", "enum": ["order", "low_stock", "social_sync", "system", "chat"] },
+        "title": { "type": "string", "maxLength": 160 },
+        "message": { "type": "string", "maxLength": 600 },
+        "time": { "type": "string", "maxLength": 64 },
+        "read": { "type": "boolean" },
+        "actionUrl": { "type": "string", "maxLength": 200 },
+        "recipientUserId": { "type": "string", "maxLength": 128 },
+        "recipientBrandName": { "type": "string", "maxLength": 100 },
+        "orderId": { "type": "string", "maxLength": 128 },
+        "targetRole": { "type": "string", "enum": ["buyer", "seller"] },
+        "createdAtIso": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "type", "title", "message", "time", "read"]
+    },
+    "ChatConversation": {
+      "title": "ChatConversation",
+      "description": "P2P buyer-seller direct commerce conversation thread with price negotiation, typing, and shared address metadata",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "storeId": { "type": "string", "maxLength": 128 },
+        "storeName": { "type": "string", "maxLength": 100 },
+        "storeAvatar": { "type": "string", "maxLength": 260000 },
+        "buyerId": { "type": "string", "maxLength": 128 },
+        "buyerName": { "type": "string", "maxLength": 100 },
+        "buyerPhone": { "type": "string", "maxLength": 30 },
+        "buyerCity": { "type": "string", "maxLength": 80 },
+        "buyerAddress": { "type": "string", "maxLength": 400 },
+        "sellerId": { "type": "string", "maxLength": 128 },
+        "isVerified": { "type": "boolean" },
+        "onlineStatus": { "type": "string", "maxLength": 80 },
+        "buyerTypingAt": { "type": "number" },
+        "sellerTypingAt": { "type": "number" },
+        "product": { "type": "object" },
+        "offerStatus": { "type": "string", "enum": ["accepted", "pending", "rejected", "countered"] },
+        "offeredPrice": { "type": "number" },
+        "counterPrice": { "type": "number" },
+        "offerUpdatedBy": { "type": "string", "enum": ["buyer", "seller"] },
+        "itemStatus": { "type": "string", "enum": ["Tersedia", "Sold Out", "Pending"] },
+        "dealOrderId": { "type": "string", "maxLength": 128 },
+        "lastMessage": { "type": "string", "maxLength": 1000 },
+        "lastTimestamp": { "type": "string", "maxLength": 64 },
+        "unreadCount": { "type": "number" },
+        "buyerUnreadCount": { "type": "number" },
+        "sellerUnreadCount": { "type": "number" },
+        "isPinned": { "type": "boolean" },
+        "pinnedAt": { "type": "number" },
+        "hiddenBy": { "type": "array" },
+        "createdAtIso": { "type": "string", "maxLength": 64 },
+        "updatedAtIso": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "storeId", "storeName", "product", "lastMessage", "lastTimestamp", "unreadCount"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "Individual message, offer, counter-offer, shared address, or deal confirmation within a conversation",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "conversationId": { "type": "string", "maxLength": 128 },
+        "sender": { "type": "string", "enum": ["user", "store", "system"] },
+        "senderId": { "type": "string", "maxLength": 128 },
+        "senderName": { "type": "string", "maxLength": 100 },
+        "storeId": { "type": "string", "maxLength": 128 },
+        "storeName": { "type": "string", "maxLength": 100 },
+        "text": { "type": "string", "maxLength": 2000 },
+        "timestamp": { "type": "string", "maxLength": 64 },
+        "image": { "type": "string", "maxLength": 760000 },
+        "isRead": { "type": "boolean" },
+        "messageType": { "type": "string", "enum": ["text", "offer", "counter_offer", "offer_response", "system", "image", "address", "deal"] },
+        "offerAmount": { "type": "number" },
+        "counterAmount": { "type": "number" },
+        "offerStatus": { "type": "string", "enum": ["accepted", "pending", "rejected", "countered"] },
+        "productContext": { "type": "object" },
+        "createdAtIso": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "sender", "storeId", "storeName", "text", "timestamp"]
+    },
+    "UserPresence": {
+      "title": "UserPresence",
+      "description": "Live online presence and last active timestamp for registered users",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128 },
+        "isOnline": { "type": "boolean" },
+        "lastActiveAt": { "type": "number" },
+        "updatedAtIso": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["userId", "isOnline", "lastActiveAt", "updatedAtIso"]
+    },
+    "LoginLog": {
+      "title": "LoginLog",
+      "description": "Device, OS, browser, and GPS/city location telemetry captured at login or registration",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "userName": { "type": "string", "maxLength": 100 },
+        "userEmail": { "type": "string", "maxLength": 120 },
+        "action": { "type": "string", "enum": ["login", "register"] },
+        "deviceType": { "type": "string", "enum": ["Mobile", "Tablet", "Desktop"] },
+        "os": { "type": "string", "maxLength": 80 },
+        "browser": { "type": "string", "maxLength": 80 },
+        "userAgent": { "type": "string", "maxLength": 500 },
+        "locationLabel": { "type": "string", "maxLength": 160 },
+        "latitude": { "type": "number" },
+        "longitude": { "type": "number" },
+        "gpsPermission": { "type": "string", "enum": ["granted", "denied", "unavailable"] },
+        "createdAtIso": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "userId", "userName", "userEmail", "action", "deviceType", "os", "browser", "locationLabel", "gpsPermission", "createdAtIso"]
+    },
+    "UserReport": {
+      "title": "UserReport",
+      "description": "User abuse or fraud report submitted from chat, storefront, or product detail",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "reportedUserId": { "type": "string", "maxLength": 128 },
+        "reportedUserName": { "type": "string", "maxLength": 100 },
+        "reporterUserId": { "type": "string", "maxLength": 128 },
+        "reporterUserName": { "type": "string", "maxLength": 100 },
+        "source": { "type": "string", "enum": ["chat", "storefront", "product"] },
+        "targetProductId": { "type": "string", "maxLength": 128 },
+        "targetProductName": { "type": "string", "maxLength": 200 },
+        "reason": { "type": "string", "maxLength": 160 },
+        "details": { "type": "string", "maxLength": 1000 },
+        "status": { "type": "string", "enum": ["pending", "reviewed", "resolved"] },
+        "adminNote": { "type": "string", "maxLength": 400 },
+        "createdAtIso": { "type": "string", "maxLength": 64 },
+        "resolvedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "reportedUserId", "reportedUserName", "reporterUserId", "reporterUserName", "source", "reason", "details", "status", "createdAtIso"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profile documents stored by user ID"
+    },
+    "/products/{productId}": {
+      "schema": "Product",
+      "description": "Product catalog documents managed by sellers and browsed by buyers"
+    },
+    "/email_registry/{emailKey}": {
+      "schema": "EmailRegistry",
+      "description": "Email uniqueness lookup index keyed by SHA-256 hex digest of normalized email"
+    },
+    "/orders/{orderId}": {
+      "schema": "Order",
+      "description": "Direct chat deal orders synced between buyer and seller"
+    },
+    "/reviews/{reviewId}": {
+      "schema": "Review",
+      "description": "Verified buyer product reviews synced across devices"
+    },
+    "/notifications/{notificationId}": {
+      "schema": "Notification",
+      "description": "User-targeted real-time chat, deal, and inventory notifications"
+    },
+    "/chat_conversations/{convId}": {
+      "schema": "ChatConversation",
+      "description": "Real-time buyer-seller conversation metadata, typing state, and price negotiation status"
+    },
+    "/chat_conversations/{convId}/messages/{messageId}": {
+      "schema": "ChatMessage",
+      "description": "Ordered message history inside a buyer-seller conversation"
+    },
+    "/user_presence/{userId}": {
+      "schema": "UserPresence",
+      "description": "Live active status and last active timestamp per user"
+    },
+    "/login_logs/{logId}": {
+      "schema": "LoginLog",
+      "description": "Device, OS, and GPS login/register logs"
+    },
+    "/user_reports/{reportId}": {
+      "schema": "UserReport",
+      "description": "Moderation reports submitted by users"
+    }
+  }
+}

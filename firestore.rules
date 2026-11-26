@@ -1,0 +1,471 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net (Default-Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidEmailKey(key) {
+      return key is string && key.size() == 64 && key.matches('^[a-f0-9]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['id', 'name', 'roles', 'activeRole']) &&
+             data.keys().hasOnly([
+               'id', 'name', 'avatarUrl', 'phone', 'password', 'email', 'city',
+               'roles', 'activeRole', 'phoneVerified', 'buyerProfile', 'sellerProfile',
+               'accountStatus', 'statusReason', 'statusUpdatedAt', 'createdAt', 'updatedAt'
+             ]) &&
+             data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 80 &&
+             (!('avatarUrl' in data) || (data.avatarUrl is string && data.avatarUrl.size() <= 760000)) &&
+             (!('phone' in data) || (data.phone is string && data.phone.size() <= 30)) &&
+             (!('password' in data) || (data.password is string && data.password.size() <= 200)) &&
+             (!('email' in data) || (data.email is string && data.email.size() <= 120)) &&
+             (!('city' in data) || (data.city is string && data.city.size() <= 80)) &&
+             data.roles is list && data.roles.size() > 0 && data.roles.size() <= 5 &&
+             data.activeRole in ['buyer', 'seller'] &&
+             (!('phoneVerified' in data) || data.phoneVerified is bool) &&
+             (!('buyerProfile' in data) || data.buyerProfile == null || data.buyerProfile is map) &&
+             (!('sellerProfile' in data) || data.sellerProfile == null || data.sellerProfile is map) &&
+             (!('accountStatus' in data) || data.accountStatus in ['active', 'blocked', 'banned']) &&
+             (!('statusReason' in data) || (data.statusReason is string && data.statusReason.size() <= 300)) &&
+             (!('statusUpdatedAt' in data) || (data.statusUpdatedAt is string && data.statusUpdatedAt.size() <= 64)) &&
+             (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 64)) &&
+             (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 64));
+    }
+
+    function isValidEmailRegistry(data, emailKey) {
+      return data.keys().hasAll(['emailKey', 'userId', 'createdAt']) &&
+             data.keys().hasOnly(['emailKey', 'userId', 'createdAt']) &&
+             data.emailKey is string &&
+             data.emailKey == emailKey &&
+             data.userId is string &&
+             data.userId.size() > 0 &&
+             data.userId.size() <= 128 &&
+             data.createdAt is string &&
+             data.createdAt.size() > 0 &&
+             data.createdAt.size() <= 64;
+    }
+
+    function isValidProduct(data) {
+      return data.keys().hasAll(['id', 'name', 'brand', 'price', 'stock', 'category']) &&
+             data.keys().hasOnly([
+               'id', 'name', 'brand', 'itemBrand', 'brandCity', 'category', 'subCategory',
+               'gender', 'fit', 'measurements', 'price', 'originalPrice', 'stock', 'sku',
+               'barcode', 'sizes', 'colors', 'material', 'image', 'images', 'condition',
+               'listingStatus', 'reservedByUserId', 'reservedByUserName', 'likesCount',
+               'allowMeetup', 'meetupArea', 'description', 'rating', 'reviewsCount',
+               'verifiedBrand', 'isFeatured', 'sellerId', 'sellerBrandName', 'sellerAvatar',
+               'isActive', 'createdAt', 'updatedAt'
+             ]) &&
+             data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 200 &&
+             data.brand is string && data.brand.size() > 0 && data.brand.size() <= 100 &&
+             (!('itemBrand' in data) || (data.itemBrand is string && data.itemBrand.size() <= 100)) &&
+             (!('brandCity' in data) || (data.brandCity is string && data.brandCity.size() <= 80)) &&
+             data.category is string && data.category.size() > 0 && data.category.size() <= 80 &&
+             (!('subCategory' in data) || (data.subCategory is string && data.subCategory.size() <= 80)) &&
+             (!('gender' in data) || data.gender in ['Pria', 'Wanita', 'Unisex']) &&
+             (!('fit' in data) || (data.fit is string && data.fit.size() <= 80)) &&
+             (!('measurements' in data) || data.measurements is map) &&
+             data.price is number && data.price >= 0 &&
+             (!('originalPrice' in data) || (data.originalPrice is number && data.originalPrice >= 0)) &&
+             data.stock is number && data.stock >= 0 &&
+             (!('sku' in data) || (data.sku is string && data.sku.size() <= 80)) &&
+             (!('barcode' in data) || (data.barcode is string && data.barcode.size() <= 80)) &&
+             (!('sizes' in data) || (data.sizes is list && data.sizes.size() <= 30)) &&
+             (!('colors' in data) || (data.colors is list && data.colors.size() <= 30)) &&
+             (!('material' in data) || (data.material is string && data.material.size() <= 200)) &&
+             (!('image' in data) || (data.image is string && data.image.size() <= 760000)) &&
+             (!('images' in data) || (data.images is list && data.images.size() <= 12)) &&
+             (!('condition' in data) || data.condition in ['Baru', 'Pre-loved']) &&
+             (!('listingStatus' in data) || data.listingStatus in ['available', 'reserved', 'sold']) &&
+             (!('reservedByUserId' in data) || (data.reservedByUserId is string && data.reservedByUserId.size() <= 128)) &&
+             (!('reservedByUserName' in data) || (data.reservedByUserName is string && data.reservedByUserName.size() <= 100)) &&
+             (!('likesCount' in data) || (data.likesCount is number && data.likesCount >= 0)) &&
+             (!('allowMeetup' in data) || data.allowMeetup is bool) &&
+             (!('meetupArea' in data) || (data.meetupArea is string && data.meetupArea.size() <= 120)) &&
+             (!('description' in data) || (data.description is string && data.description.size() <= 4000)) &&
+             (!('rating' in data) || (data.rating is number && data.rating >= 0 && data.rating <= 5)) &&
+             (!('reviewsCount' in data) || (data.reviewsCount is number && data.reviewsCount >= 0)) &&
+             (!('verifiedBrand' in data) || data.verifiedBrand is bool) &&
+             (!('isFeatured' in data) || data.isFeatured is bool) &&
+             (!('sellerId' in data) || (data.sellerId is string && data.sellerId.size() <= 128)) &&
+             (!('sellerBrandName' in data) || (data.sellerBrandName is string && data.sellerBrandName.size() <= 100)) &&
+             (!('sellerAvatar' in data) || (data.sellerAvatar is string && data.sellerAvatar.size() <= 300000)) &&
+             (!('isActive' in data) || data.isActive is bool) &&
+             (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 64)) &&
+             (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 64));
+    }
+
+    function isValidOrder(data) {
+      return data.keys().hasAll([
+               'id', 'orderNumber', 'customerName', 'customerPhone', 'customerCity',
+               'customerAddress', 'items', 'totalAmount', 'shippingFee', 'courier',
+               'paymentMethod', 'paymentStatus', 'orderStatus', 'trackingNumber', 'createdAt'
+             ]) &&
+             data.keys().hasOnly([
+               'id', 'orderNumber', 'buyerId', 'buyerName', 'buyerEmail',
+               'sellerId', 'sellerBrandName', 'customerName', 'customerPhone',
+               'customerCity', 'customerAddress', 'items', 'totalAmount', 'shippingFee',
+               'courier', 'paymentMethod', 'paymentStatus', 'orderStatus', 'escrowStatus',
+               'buyerConfirmedAt', 'negotiatedFromOffer', 'trackingNumber', 'createdAt', 'createdAtIso'
+             ]) &&
+             data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
+             data.orderNumber is string && data.orderNumber.size() > 0 && data.orderNumber.size() <= 64 &&
+             (!('buyerId' in data) || (data.buyerId is string && data.buyerId.size() <= 128)) &&
+             (!('buyerName' in data) || (data.buyerName is string && data.buyerName.size() <= 100)) &&
+             (!('buyerEmail' in data) || (data.buyerEmail is string && data.buyerEmail.size() <= 120)) &&
+             (!('sellerId' in data) || (data.sellerId is string && data.sellerId.size() <= 128)) &&
+             (!('sellerBrandName' in data) || (data.sellerBrandName is string && data.sellerBrandName.size() <= 100)) &&
+             data.customerName is string && data.customerName.size() > 0 && data.customerName.size() <= 100 &&
+             data.customerPhone is string && data.customerPhone.size() > 0 && data.customerPhone.size() <= 30 &&
+             data.customerCity is string && data.customerCity.size() > 0 && data.customerCity.size() <= 80 &&
+             data.customerAddress is string && data.customerAddress.size() > 0 && data.customerAddress.size() <= 400 &&
+             data.items is list && data.items.size() > 0 && data.items.size() <= 50 &&
+             data.totalAmount is number && data.totalAmount >= 0 &&
+             data.shippingFee is number && data.shippingFee >= 0 &&
+             data.courier is string && data.courier.size() > 0 && data.courier.size() <= 100 &&
+             data.paymentMethod in ['chat_direct', 'cod', 'transfer_langsung', 'qris', 'bca_va', 'mandiri_va', 'bri_va', 'bni_va', 'gopay', 'ovo', 'dana', 'shopeepay'] &&
+             data.paymentStatus in ['paid', 'pending'] &&
+             data.orderStatus in ['menunggu_pembayaran', 'diproses', 'dikirim', 'selesai'] &&
+             (!('escrowStatus' in data) || data.escrowStatus in ['held', 'released']) &&
+             (!('buyerConfirmedAt' in data) || (data.buyerConfirmedAt is string && data.buyerConfirmedAt.size() <= 64)) &&
+             (!('negotiatedFromOffer' in data) || data.negotiatedFromOffer is bool) &&
+             data.trackingNumber is string && data.trackingNumber.size() <= 100 &&
+             data.createdAt is string && data.createdAt.size() > 0 && data.createdAt.size() <= 64 &&
+             (!('createdAtIso' in data) || (data.createdAtIso is string && data.createdAtIso.size() <= 64));
+    }
+
+    function isValidReview(data) {
+      return data.keys().hasAll([
+               'id', 'productId', 'author', 'city', 'rating', 'comment',
+               'sizePurchased', 'fitFeedback', 'verifiedPurchase', 'date', 'helpfulCount'
+             ]) &&
+             data.keys().hasOnly([
+               'id', 'productId', 'author', 'city', 'rating', 'comment',
+               'sizePurchased', 'fitFeedback', 'verifiedPurchase', 'date',
+               'helpfulCount', 'images', 'userStats', 'createdAtIso'
+             ]) &&
+             data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
+             data.productId is string && data.productId.size() > 0 && data.productId.size() <= 128 &&
+             data.author is string && data.author.size() > 0 && data.author.size() <= 100 &&
+             data.city is string && data.city.size() > 0 && data.city.size() <= 80 &&
+             data.rating is number && data.rating >= 1 && data.rating <= 5 &&
+             data.comment is string && data.comment.size() > 0 && data.comment.size() <= 1500 &&
+             data.sizePurchased is string && data.sizePurchased.size() <= 40 &&
+             data.fitFeedback in ['Pas', 'Agak Kecil', 'Agak Longgar'] &&
+             data.verifiedPurchase is bool &&
+             data.date is string && data.date.size() > 0 && data.date.size() <= 64 &&
+             data.helpfulCount is number && data.helpfulCount >= 0 &&
+             (!('images' in data) || (data.images is list && data.images.size() <= 4)) &&
+             (!('userStats' in data) || (data.userStats is string && data.userStats.size() <= 100)) &&
+             (!('createdAtIso' in data) || (data.createdAtIso is string && data.createdAtIso.size() <= 64));
+    }
+
+    function isValidNotification(data) {
+      return data.keys().hasAll(['id', 'type', 'title', 'message', 'time', 'read']) &&
+             data.keys().hasOnly([
+               'id', 'type', 'title', 'message', 'time', 'read', 'actionUrl',
+               'recipientUserId', 'recipientBrandName', 'orderId', 'targetRole', 'createdAtIso'
+             ]) &&
+             data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
+             data.type in ['order', 'low_stock', 'social_sync', 'system', 'chat'] &&
+             data.title is string && data.title.size() > 0 && data.title.size() <= 160 &&
+             data.message is string && data.message.size() > 0 && data.message.size() <= 600 &&
+             data.time is string && data.time.size() > 0 && data.time.size() <= 64 &&
+             data.read is bool &&
+             (!('actionUrl' in data) || (data.actionUrl is string && data.actionUrl.size() <= 200)) &&
+             (!('recipientUserId' in data) || (data.recipientUserId is string && data.recipientUserId.size() <= 128)) &&
+             (!('recipientBrandName' in data) || (data.recipientBrandName is string && data.recipientBrandName.size() <= 100)) &&
+             (!('orderId' in data) || (data.orderId is string && data.orderId.size() <= 128)) &&
+             (!('targetRole' in data) || data.targetRole in ['buyer', 'seller']) &&
+             (!('createdAtIso' in data) || (data.createdAtIso is string && data.createdAtIso.size() <= 64));
+    }
+
+    function isValidChatProductContext(p) {
+      return p is map &&
+             p.keys().hasAll(['id', 'name', 'price', 'image', 'brand']) &&
+             p.keys().hasOnly(['id', 'name', 'price', 'image', 'brand', 'sellerId', 'status']) &&
+             p.id is string && p.id.size() > 0 && p.id.size() <= 128 &&
+             p.name is string && p.name.size() > 0 && p.name.size() <= 200 &&
+             p.price is number && p.price >= 0 &&
+             p.image is string && p.image.size() <= 760000 &&
+             p.brand is string && p.brand.size() > 0 && p.brand.size() <= 100 &&
+             (!('sellerId' in p) || (p.sellerId is string && p.sellerId.size() <= 128)) &&
+             (!('status' in p) || p.status in ['Tersedia', 'Sold Out', 'Nego']);
+    }
+
+    function isValidChatConversation(data, convId) {
+      return data.keys().hasAll(['id', 'storeId', 'storeName', 'product', 'lastMessage', 'lastTimestamp', 'unreadCount']) &&
+             data.keys().hasOnly([
+               'id', 'storeId', 'storeName', 'storeAvatar', 'buyerId', 'buyerName',
+               'buyerPhone', 'buyerCity', 'buyerAddress', 'sellerId',
+               'isVerified', 'onlineStatus', 'buyerTypingAt', 'sellerTypingAt',
+               'product', 'offerStatus', 'offeredPrice', 'counterPrice',
+               'offerUpdatedBy', 'itemStatus', 'dealOrderId', 'lastMessage', 'lastTimestamp',
+               'unreadCount', 'buyerUnreadCount', 'sellerUnreadCount', 'isPinned', 'pinnedAt',
+               'hiddenBy', 'createdAtIso', 'updatedAtIso'
+             ]) &&
+             data.id is string && data.id == convId && data.id.size() <= 128 &&
+             data.storeId is string && data.storeId.size() > 0 && data.storeId.size() <= 128 &&
+             data.storeName is string && data.storeName.size() > 0 && data.storeName.size() <= 100 &&
+             (!('storeAvatar' in data) || (data.storeAvatar is string && data.storeAvatar.size() <= 300000)) &&
+             (!('buyerId' in data) || (data.buyerId is string && data.buyerId.size() <= 128)) &&
+             (!('buyerName' in data) || (data.buyerName is string && data.buyerName.size() <= 100)) &&
+             (!('buyerPhone' in data) || (data.buyerPhone is string && data.buyerPhone.size() <= 30)) &&
+             (!('buyerCity' in data) || (data.buyerCity is string && data.buyerCity.size() <= 80)) &&
+             (!('buyerAddress' in data) || (data.buyerAddress is string && data.buyerAddress.size() <= 400)) &&
+             (!('sellerId' in data) || (data.sellerId is string && data.sellerId.size() <= 128)) &&
+             (!('isVerified' in data) || data.isVerified is bool) &&
+             (!('onlineStatus' in data) || (data.onlineStatus is string && data.onlineStatus.size() <= 80)) &&
+             (!('buyerTypingAt' in data) || (data.buyerTypingAt is number && data.buyerTypingAt >= 0)) &&
+             (!('sellerTypingAt' in data) || (data.sellerTypingAt is number && data.sellerTypingAt >= 0)) &&
+             isValidChatProductContext(data.product) &&
+             (!('offerStatus' in data) || data.offerStatus == null || data.offerStatus in ['accepted', 'pending', 'rejected', 'countered']) &&
+             (!('offeredPrice' in data) || (data.offeredPrice is number && data.offeredPrice >= 0)) &&
+             (!('counterPrice' in data) || (data.counterPrice is number && data.counterPrice >= 0)) &&
+             (!('offerUpdatedBy' in data) || data.offerUpdatedBy in ['buyer', 'seller']) &&
+             (!('itemStatus' in data) || data.itemStatus in ['Tersedia', 'Sold Out', 'Pending']) &&
+             (!('dealOrderId' in data) || (data.dealOrderId is string && data.dealOrderId.size() <= 128)) &&
+             data.lastMessage is string && data.lastMessage.size() <= 1000 &&
+             data.lastTimestamp is string && data.lastTimestamp.size() > 0 && data.lastTimestamp.size() <= 64 &&
+             data.unreadCount is number && data.unreadCount >= 0 &&
+             (!('buyerUnreadCount' in data) || (data.buyerUnreadCount is number && data.buyerUnreadCount >= 0)) &&
+             (!('sellerUnreadCount' in data) || (data.sellerUnreadCount is number && data.sellerUnreadCount >= 0)) &&
+             (!('isPinned' in data) || data.isPinned is bool) &&
+             (!('pinnedAt' in data) || data.pinnedAt is number) &&
+             (!('hiddenBy' in data) || (data.hiddenBy is list && data.hiddenBy.size() <= 20)) &&
+             (!('createdAtIso' in data) || (data.createdAtIso is string && data.createdAtIso.size() <= 64)) &&
+             (!('updatedAtIso' in data) || (data.updatedAtIso is string && data.updatedAtIso.size() <= 64));
+    }
+
+    function isValidChatMessage(data, convId, messageId) {
+      return data.keys().hasAll(['id', 'sender', 'storeId', 'storeName', 'text', 'timestamp']) &&
+             data.keys().hasOnly([
+               'id', 'conversationId', 'sender', 'senderId', 'senderName', 'storeId', 'storeName',
+               'text', 'timestamp', 'image', 'isRead', 'messageType', 'offerAmount', 'counterAmount',
+               'offerStatus', 'productContext', 'createdAtIso'
+             ]) &&
+             data.id is string && data.id == messageId && data.id.size() <= 128 &&
+             (!('conversationId' in data) || (data.conversationId is string && data.conversationId == convId && data.conversationId.size() <= 128)) &&
+             data.sender in ['user', 'store', 'system'] &&
+             (!('senderId' in data) || (data.senderId is string && data.senderId.size() <= 128)) &&
+             (!('senderName' in data) || (data.senderName is string && data.senderName.size() <= 100)) &&
+             data.storeId is string && data.storeId.size() > 0 && data.storeId.size() <= 128 &&
+             data.storeName is string && data.storeName.size() > 0 && data.storeName.size() <= 100 &&
+             data.text is string && data.text.size() <= 2000 &&
+             data.timestamp is string && data.timestamp.size() > 0 && data.timestamp.size() <= 64 &&
+             (!('image' in data) || (data.image is string && data.image.size() <= 760000)) &&
+             (!('isRead' in data) || data.isRead is bool) &&
+             (!('messageType' in data) || data.messageType in ['text', 'offer', 'counter_offer', 'offer_response', 'system', 'image', 'address', 'deal']) &&
+             (!('offerAmount' in data) || (data.offerAmount is number && data.offerAmount >= 0)) &&
+             (!('counterAmount' in data) || (data.counterAmount is number && data.counterAmount >= 0)) &&
+             (!('offerStatus' in data) || data.offerStatus in ['accepted', 'pending', 'rejected', 'countered']) &&
+             (!('productContext' in data) || isValidChatProductContext(data.productContext)) &&
+             (!('createdAtIso' in data) || (data.createdAtIso is string && data.createdAtIso.size() <= 64));
+    }
+
+    function isValidPresence(data, userId) {
+      return data.keys().hasAll(['userId', 'isOnline', 'lastActiveAt', 'updatedAtIso']) &&
+             data.keys().hasOnly(['userId', 'isOnline', 'lastActiveAt', 'updatedAtIso']) &&
+             data.userId is string && data.userId == userId &&
+             data.isOnline is bool &&
+             data.lastActiveAt is number && data.lastActiveAt >= 0 &&
+             data.updatedAtIso is string && data.updatedAtIso.size() <= 64;
+    }
+
+    function isValidLoginLog(data, logId) {
+      return data.keys().hasAll([
+               'id', 'userId', 'userName', 'userEmail', 'action', 'deviceType',
+               'os', 'browser', 'userAgent', 'locationLabel', 'gpsPermission', 'createdAtIso'
+             ]) &&
+             data.keys().hasOnly([
+               'id', 'userId', 'userName', 'userEmail', 'action', 'deviceType',
+               'os', 'browser', 'userAgent', 'locationLabel', 'latitude', 'longitude',
+               'gpsPermission', 'createdAtIso'
+             ]) &&
+             data.id is string && data.id == logId && data.id.size() <= 128 &&
+             data.userId is string && data.userId.size() > 0 && data.userId.size() <= 128 &&
+             data.userName is string && data.userName.size() <= 100 &&
+             data.userEmail is string && data.userEmail.size() <= 120 &&
+             data.action in ['login', 'register'] &&
+             data.deviceType in ['Mobile', 'Tablet', 'Desktop'] &&
+             data.os is string && data.os.size() <= 80 &&
+             data.browser is string && data.browser.size() <= 80 &&
+             data.userAgent is string && data.userAgent.size() <= 500 &&
+             data.locationLabel is string && data.locationLabel.size() <= 160 &&
+             (!('latitude' in data) || data.latitude is number) &&
+             (!('longitude' in data) || data.longitude is number) &&
+             data.gpsPermission in ['granted', 'denied', 'unavailable'] &&
+             data.createdAtIso is string && data.createdAtIso.size() <= 64;
+    }
+
+    function isValidUserReport(data, reportId) {
+      return data.keys().hasAll([
+               'id', 'reportedUserId', 'reportedUserName', 'reporterUserId',
+               'reporterUserName', 'source', 'reason', 'details', 'status', 'createdAtIso'
+             ]) &&
+             data.keys().hasOnly([
+               'id', 'reportedUserId', 'reportedUserName', 'reporterUserId',
+               'reporterUserName', 'source', 'targetProductId', 'targetProductName',
+               'reason', 'details', 'status', 'adminNote', 'createdAtIso', 'resolvedAt'
+             ]) &&
+             data.id is string && data.id == reportId && data.id.size() <= 128 &&
+             data.reportedUserId is string && data.reportedUserId.size() > 0 && data.reportedUserId.size() <= 128 &&
+             data.reportedUserName is string && data.reportedUserName.size() > 0 && data.reportedUserName.size() <= 100 &&
+             data.reporterUserId is string && data.reporterUserId.size() > 0 && data.reporterUserId.size() <= 128 &&
+             data.reporterUserName is string && data.reporterUserName.size() > 0 && data.reporterUserName.size() <= 100 &&
+             data.source in ['chat', 'storefront', 'product'] &&
+             (!('targetProductId' in data) || (data.targetProductId is string && data.targetProductId.size() <= 128)) &&
+             (!('targetProductName' in data) || (data.targetProductName is string && data.targetProductName.size() <= 200)) &&
+             data.reason is string && data.reason.size() > 0 && data.reason.size() <= 160 &&
+             data.details is string && data.details.size() <= 1000 &&
+             data.status in ['pending', 'reviewed', 'resolved'] &&
+             (!('adminNote' in data) || (data.adminNote is string && data.adminNote.size() <= 400)) &&
+             data.createdAtIso is string && data.createdAtIso.size() <= 64 &&
+             (!('resolvedAt' in data) || (data.resolvedAt is string && data.resolvedAt.size() <= 64));
+    }
+
+    // Users Collection
+    match /users/{userId} {
+      allow get: if isValidId(userId);
+      allow list: if true;
+      allow create: if isValidId(userId) && isValidUser(incoming()) && incoming().id == userId;
+      allow update: if isValidId(userId) && isValidUser(incoming()) && incoming().id == resource.data.id;
+      allow delete: if isValidId(userId);
+    }
+
+    // Email Uniqueness Registry (hashed keys only)
+    match /email_registry/{emailKey} {
+      allow get: if isValidEmailKey(emailKey);
+      allow list: if false;
+      allow create: if isValidEmailKey(emailKey) &&
+                       isValidEmailRegistry(incoming(), emailKey) &&
+                       !exists(/databases/$(database)/documents/email_registry/$(emailKey));
+      allow update: if false;
+      allow delete: if isValidEmailKey(emailKey);
+    }
+
+    // Products Collection (Validated Schema, Public Browseable)
+    match /products/{productId} {
+      allow get: if isValidId(productId);
+      allow list: if true;
+      allow create: if isValidId(productId) && isValidProduct(incoming()) && incoming().id == productId;
+      allow update: if isValidId(productId) && isValidProduct(incoming()) && incoming().id == resource.data.id;
+      allow delete: if isValidId(productId);
+    }
+
+    // Orders Collection (Buyer & Seller Synced Direct Deals)
+    match /orders/{orderId} {
+      allow get: if isValidId(orderId);
+      allow list: if true;
+      allow create: if isValidId(orderId) && isValidOrder(incoming()) && incoming().id == orderId;
+      allow update: if isValidId(orderId) &&
+                       isValidOrder(incoming()) &&
+                       resource.data.orderStatus != 'selesai' &&
+                       incoming().diff(resource.data).affectedKeys().hasOnly(['orderStatus', 'trackingNumber', 'courier', 'escrowStatus', 'buyerConfirmedAt', 'paymentStatus']) &&
+                       incoming().id == resource.data.id &&
+                       incoming().orderNumber == resource.data.orderNumber &&
+                       incoming().totalAmount == resource.data.totalAmount;
+      allow delete: if false;
+    }
+
+    // Reviews Collection (Cross-device Verified Buyer Reviews)
+    match /reviews/{reviewId} {
+      allow get: if isValidId(reviewId);
+      allow list: if true;
+      allow create: if isValidId(reviewId) && isValidReview(incoming()) && incoming().id == reviewId;
+      allow update: if isValidId(reviewId) &&
+                       isValidReview(incoming()) &&
+                       incoming().diff(resource.data).affectedKeys().hasOnly(['helpfulCount']);
+      allow delete: if isValidId(reviewId);
+    }
+
+    // Notifications Collection (Buyer & Seller Real-Time Alerts)
+    match /notifications/{notificationId} {
+      allow get: if isValidId(notificationId);
+      allow list: if true;
+      allow create: if isValidId(notificationId) && isValidNotification(incoming()) && incoming().id == notificationId;
+      allow update: if isValidId(notificationId) &&
+                       isValidNotification(incoming()) &&
+                       incoming().diff(resource.data).affectedKeys().hasOnly(['read']);
+      allow delete: if false;
+    }
+
+    // Direct Chat Conversations & Messages
+    match /chat_conversations/{convId} {
+      allow get: if isValidId(convId);
+      allow list: if true;
+      allow create: if isValidId(convId) && isValidChatConversation(incoming(), convId);
+      allow update: if isValidId(convId) &&
+                       isValidChatConversation(incoming(), convId) &&
+                       incoming().id == resource.data.id &&
+                       incoming().diff(resource.data).affectedKeys().hasOnly([
+                         'offerStatus', 'offeredPrice', 'counterPrice', 'offerUpdatedBy',
+                         'itemStatus', 'dealOrderId', 'lastMessage', 'lastTimestamp',
+                         'unreadCount', 'buyerUnreadCount', 'sellerUnreadCount',
+                         'isPinned', 'pinnedAt', 'hiddenBy', 'updatedAtIso',
+                         'buyerPhone', 'buyerCity', 'buyerAddress',
+                         'buyerTypingAt', 'sellerTypingAt'
+                       ]);
+      allow delete: if false;
+
+      match /messages/{messageId} {
+        allow get: if isValidId(convId) && isValidId(messageId);
+        allow list: if isValidId(convId);
+        allow create: if isValidId(convId) && isValidId(messageId) && isValidChatMessage(incoming(), convId, messageId);
+        allow update: if isValidId(convId) &&
+                         isValidId(messageId) &&
+                         isValidChatMessage(incoming(), convId, messageId) &&
+                         incoming().id == resource.data.id &&
+                         incoming().diff(resource.data).affectedKeys().hasOnly(['offerStatus', 'isRead', 'counterAmount']);
+        allow delete: if false;
+      }
+    }
+
+    // Live User Presence
+    match /user_presence/{userId} {
+      allow get: if isValidId(userId);
+      allow list: if true;
+      allow create, update: if isValidId(userId) && isValidPresence(incoming(), userId);
+      allow delete: if false;
+    }
+
+    // Login & Register Telemetry Logs
+    match /login_logs/{logId} {
+      allow get: if isValidId(logId);
+      allow list: if true;
+      allow create: if isValidId(logId) && isValidLoginLog(incoming(), logId);
+      allow update, delete: if false;
+    }
+
+    // User Reports for Superadmin Moderation
+    match /user_reports/{reportId} {
+      allow get: if isValidId(reportId);
+      allow list: if true;
+      allow create: if isValidId(reportId) && isValidUserReport(incoming(), reportId);
+      allow update: if isValidId(reportId) &&
+                       isValidUserReport(incoming(), reportId) &&
+                       incoming().diff(resource.data).affectedKeys().hasOnly(['status', 'adminNote', 'resolvedAt']);
+      allow delete: if false;
+    }
+
+    // Connection testing doc
+    match /test/connection {
+      allow read: if true;
+    }
+  }
+}
