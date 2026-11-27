@@ -16,7 +16,10 @@ import {
   copyTextToClipboard,
 } from '../utils/marketplaceSocial';
 import { useConfirm } from './ConfirmDialogContext';
+import { compressImageForUpload } from '../utils/imageCompression';
+import { hashPassword } from '../utils/passwordHash';
 import { ProductCard } from './ProductCard';
+import { StoreTestimonialsModal } from './StoreTestimonialsModal';
 
 interface StoreTarget {
   brandName: string;
@@ -43,9 +46,10 @@ interface ProfilePageProps {
   onShareStore?: (brandName: string, url: string) => void;
   onOpenFollowers?: (brandName: string, tab?: 'followers' | 'following', sellerId?: string) => void;
   onManageListings?: () => void;
-  onAddReview?: (review: Omit<Review, 'id' | 'date' | 'helpfulCount'>) => void;
+  onAddReview?: (review: Omit<Review, 'id' | 'date' | 'helpfulCount'>) => Promise<void> | void;
   onRequireAuthForReview?: () => void;
   onReportStore?: (target: ReportTarget) => void;
+  purchasedProductIds?: string[];
 }
 
 export const ProfilePage: React.FC<ProfilePageProps> = ({
@@ -71,6 +75,7 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
   onAddReview,
   onRequireAuthForReview,
   onReportStore,
+  purchasedProductIds = [],
 }) => {
   const confirm = useConfirm();
 
@@ -81,6 +86,7 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
   const [activeTab, setActiveTab] = useState<'listings' | 'testimonials' | 'edit'>('listings');
   const [listingSearch, setListingSearch] = useState('');
   const [copiedStoreLink, setCopiedStoreLink] = useState(false);
+  const [isTestimonialsModalOpen, setIsTestimonialsModalOpen] = useState(false);
 
   // Testimonial filters & inline review creation (aligned with ProductDetailModal & reference UI)
   const [reviewFilter, setReviewFilter] = useState<'all' | 'with_photo' | '5_star' | '4_star'>('all');
@@ -91,6 +97,8 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
   const [reviewCity, setReviewCity] = useState(userProfile.buyerProfile?.city || userProfile.brandCity || 'Jakarta');
   const [reviewPhotos, setReviewPhotos] = useState<string[]>([]);
   const [reviewPhotoError, setReviewPhotoError] = useState<string | null>(null);
+  const [isSubmittingStoreReview, setIsSubmittingStoreReview] = useState(false);
+  const [storeReviewError, setStoreReviewError] = useState<string | null>(null);
   const reviewFileInputRef = useRef<HTMLInputElement>(null);
   const [activeLightbox, setActiveLightbox] = useState<{
     imageUrl: string;
@@ -255,11 +263,22 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
     return sellerEntry?.rating ? sellerEntry.rating.toFixed(1) : '4.9';
   }, [storeTestimonials, storeListings, sellerEntry]);
 
+  const eligibleReviewProducts = useMemo(() => {
+    if (!userProfile.isRegistered || isOwnStore) return [];
+    const purchasedSet = new Set(purchasedProductIds);
+    return storeListings.filter((p) => purchasedSet.has(p.id));
+  }, [storeListings, purchasedProductIds, userProfile.isRegistered, isOwnStore]);
+
   useEffect(() => {
-    if (storeListings.length > 0 && !storeProductById.has(reviewProductId)) {
-      setReviewProductId(storeListings[0].id);
+    if (eligibleReviewProducts.length > 0) {
+      if (!eligibleReviewProducts.some((p) => p.id === reviewProductId)) {
+        setReviewProductId(eligibleReviewProducts[0].id);
+      }
+    } else {
+      if (reviewProductId) setReviewProductId('');
+      setShowReviewForm(false);
     }
-  }, [storeListings, storeProductById, reviewProductId]);
+  }, [eligibleReviewProducts, reviewProductId]);
 
   const handleCopyStoreLink = async () => {
     const shareUrl = buildStoreShareUrl(targetBrandName, targetSellerId);
@@ -271,64 +290,88 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
     onShareStore?.(targetBrandName, shareUrl);
   };
 
-  const handleAvatarFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleAvatarFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
-    if (file.size > 2 * 1024 * 1024) {
-      setErrorMessage('Ukuran foto maksimal 2MB.');
+    if (file.size > 25 * 1024 * 1024) {
+      setErrorMessage('Ukuran foto maksimal 25MB.');
       return;
     }
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      setAvatarUrl(reader.result as string);
+    try {
+      const compressed = await compressImageForUpload(file, {
+        maxDimension: 420,
+        quality: 0.78,
+        maxDataUrlLength: 350_000,
+      });
+      setAvatarUrl(compressed);
       setAvatarError(false);
       setErrorMessage('');
-    };
-    reader.readAsDataURL(file);
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : 'Gagal memproses foto profil.');
+    }
   };
 
-  const handleReviewPhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleReviewPhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
+    e.target.value = '';
     if (!files || files.length === 0) return;
     setReviewPhotoError(null);
     const remaining = Math.max(0, 3 - reviewPhotos.length);
-    Array.from(files)
-      .slice(0, remaining)
-      .forEach((file) => {
-        if (file.size > 2 * 1024 * 1024) {
-          setReviewPhotoError('Ukuran foto ulasan maksimal 2MB.');
-          return;
-        }
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          setReviewPhotos((prev) => [...prev, reader.result as string].slice(0, 3));
-        };
-        reader.readAsDataURL(file);
-      });
+    for (const file of Array.from(files).slice(0, remaining)) {
+      if (file.size > 25 * 1024 * 1024) {
+        setReviewPhotoError('Ukuran foto ulasan maksimal 25MB.');
+        continue;
+      }
+      try {
+        const compressed = await compressImageForUpload(file, {
+          maxDimension: 760,
+          quality: 0.72,
+          maxDataUrlLength: 220_000,
+        });
+        setReviewPhotos((prev) => [...prev, compressed].slice(0, 3));
+      } catch (err) {
+        setReviewPhotoError(err instanceof Error ? err.message : 'Gagal memproses foto ulasan.');
+      }
+    }
   };
 
-  const handleSubmitStoreReview = (e: React.FormEvent) => {
+  const handleSubmitStoreReview = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!onAddReview || !reviewComment.trim()) return;
-    const chosenProduct = storeProductById.get(reviewProductId) || storeListings[0];
-    if (!chosenProduct) return;
+    if (!onAddReview || !reviewComment.trim() || isSubmittingStoreReview) return;
+    const chosenProduct =
+      eligibleReviewProducts.find((p) => p.id === reviewProductId) || eligibleReviewProducts[0];
+    if (!chosenProduct) {
+      setStoreReviewError('Hanya pembeli yang berhasil membeli barang di lapak ini yang dapat mengirim ulasan.');
+      return;
+    }
 
-    onAddReview({
-      productId: chosenProduct.id,
-      author: userProfile.name || 'Pembeli AROOS',
-      city: reviewCity.trim() || userProfile.buyerProfile?.city || 'Indonesia',
-      rating: reviewRating,
-      comment: reviewComment.trim(),
-      sizePurchased: chosenProduct.sizes?.[0] || 'Standar',
-      fitFeedback: 'Pas',
-      verifiedPurchase: true,
-      images: reviewPhotos.length > 0 ? reviewPhotos : undefined,
-    });
+    setStoreReviewError(null);
+    setIsSubmittingStoreReview(true);
+    try {
+      await onAddReview({
+        productId: chosenProduct.id,
+        author: userProfile.name || 'Pembeli AROOS',
+        city: reviewCity.trim() || userProfile.buyerProfile?.city || 'Indonesia',
+        rating: reviewRating,
+        comment: reviewComment.trim(),
+        sizePurchased: chosenProduct.sizes?.[0] || 'Standar',
+        fitFeedback: 'Pas',
+        verifiedPurchase: true,
+        images: reviewPhotos.length > 0 ? reviewPhotos : undefined,
+      });
 
-    setReviewComment('');
-    setReviewPhotos([]);
-    setReviewRating(5);
-    setShowReviewForm(false);
+      setReviewComment('');
+      setReviewPhotos([]);
+      setReviewRating(5);
+      setShowReviewForm(false);
+    } catch (err) {
+      setStoreReviewError(
+        err instanceof Error ? err.message : 'Gagal mengirim ulasan ke server. Silakan coba lagi.'
+      );
+    } finally {
+      setIsSubmittingStoreReview(false);
+    }
   };
 
   const handleSave = async (e: React.FormEvent) => {
@@ -375,12 +418,16 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
         throw new Error('Akun pengguna tidak ditemukan.');
       }
 
+      const nextPassword = newPassword
+        ? await hashPassword(newPassword)
+        : currentAcc.password;
+
       const updatedAccount: UserAccount = {
         ...currentAcc,
         name: name.trim(),
         phone: phone.trim(),
         avatarUrl: avatarUrl.trim(),
-        password: newPassword ? newPassword : currentAcc.password,
+        password: nextPassword,
         roles: Array.from(new Set([...(currentAcc.roles || ['buyer']), 'seller'])),
         buyerProfile: {
           ...currentAcc.buyerProfile,
@@ -397,8 +444,8 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
         },
       };
 
-      setCurrentUserAccount(updatedAccount);
       await saveUserToFirestore(updatedAccount);
+      setCurrentUserAccount(updatedAccount);
       onProfileUpdated(updatedAccount);
 
       setSuccessMessage('Profil & Alamat berhasil diperbarui.');
@@ -414,43 +461,8 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
   };
 
   return (
-    <div className="min-h-screen bg-[#fafafa] pb-24">
-      <div className="bg-white border-b border-neutral-200 sticky top-0 z-30">
-        <div className="max-w-5xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-3">
-          <button
-            type="button"
-            onClick={onGoHome}
-            className="inline-flex items-center gap-2 text-xs font-bold text-neutral-800 hover:text-neutral-950 transition-colors cursor-pointer"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            <span>Kembali ke Beranda</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={handleCopyStoreLink}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold border transition-all cursor-pointer whitespace-nowrap ${
-              copiedStoreLink
-                ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                : 'bg-neutral-50 hover:bg-neutral-100 text-neutral-700 border-neutral-200'
-            }`}
-          >
-            {copiedStoreLink ? (
-              <>
-                <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                <span>Link Disalin</span>
-              </>
-            ) : (
-              <>
-                <Share2 className="w-3.5 h-3.5 shrink-0" />
-                <span>Bagikan Toko</span>
-              </>
-            )}
-          </button>
-        </div>
-      </div>
-
-      <div className="max-w-5xl mx-auto px-4 sm:px-6 pt-6 sm:pt-8 space-y-6">
+    <div className="min-h-screen bg-[#fafafa] pb-24 pt-6 sm:pt-8">
+      <div className="max-w-5xl mx-auto px-4 sm:px-6 space-y-6">
         {/* Profile / Storefront Header Card */}
         <div className="bg-white rounded-3xl border border-neutral-200/90 shadow-sm p-6 sm:p-8 flex flex-col sm:flex-row items-center sm:items-start gap-6">
           <div className="relative w-24 h-24 sm:w-28 sm:h-28 rounded-full overflow-hidden bg-neutral-900 text-white flex items-center justify-center text-3xl font-extrabold uppercase shrink-0 shadow-md border-4 border-white">
@@ -562,15 +574,15 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
                 <span>{displayCity}</span>
               </span>
               <span aria-hidden="true">·</span>
-              <span className="inline-flex items-center gap-1 tabular-nums">
-                <Package className="w-3.5 h-3.5 text-neutral-400" />
-                <span>{storeListings.length} Listing Aktif</span>
-              </span>
-              <span aria-hidden="true">·</span>
-              <span className="inline-flex items-center gap-1 tabular-nums">
+              <button
+                type="button"
+                onClick={() => setIsTestimonialsModalOpen(true)}
+                className="inline-flex items-center gap-1 tabular-nums hover:text-neutral-950 hover:underline cursor-pointer"
+                title="Lihat semua testimoni & ulasan toko"
+              >
                 <Star className="w-3.5 h-3.5 text-amber-500 fill-amber-500" />
                 <span>{averageRating} ({storeTestimonials.length} Ulasan)</span>
-              </span>
+              </button>
               <span aria-hidden="true">·</span>
               {onOpenFollowers ? (
                 <button
@@ -727,7 +739,7 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
                 <span className="text-xs font-medium text-neutral-500 self-start sm:self-auto">
                   Pemilik lapak
                 </span>
-              ) : onAddReview && storeListings.length > 0 ? (
+              ) : userProfile.isRegistered && onAddReview && eligibleReviewProducts.length > 0 ? (
                 <button
                   type="button"
                   onClick={() => {
@@ -742,7 +754,11 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
                   <Plus className="w-4 h-4" />
                   <span>{showReviewForm ? 'Tutup Form' : 'Tulis Ulasan & Foto'}</span>
                 </button>
-              ) : null}
+              ) : (
+                <span className="text-xs font-medium text-neutral-500 self-start sm:self-auto">
+                  Khusus pembeli yang berhasil membeli barang di lapak ini
+                </span>
+              )}
             </div>
 
             {allBuyerPhotos.length > 0 && (
@@ -830,7 +846,7 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
               </button>
             </div>
 
-            {showReviewForm && !isOwnStore && storeListings.length > 0 && (
+            {showReviewForm && !isOwnStore && userProfile.isRegistered && eligibleReviewProducts.length > 0 && (
               <form
                 onSubmit={handleSubmitStoreReview}
                 className="p-5 bg-neutral-50 rounded-2xl border border-neutral-200 space-y-4 text-xs"
@@ -845,7 +861,7 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
                       onChange={(e) => setReviewProductId(e.target.value)}
                       className="w-full px-3 py-2 bg-white border border-neutral-300 rounded-xl text-neutral-900"
                     >
-                      {storeListings.map((prod) => (
+                      {eligibleReviewProducts.map((prod) => (
                         <option key={prod.id} value={prod.id}>
                           {prod.name}
                         </option>
@@ -898,6 +914,12 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
                   />
                 </div>
 
+                {storeReviewError && (
+                  <p className="text-[11px] font-medium text-red-600 bg-red-50 border border-red-200 rounded-xl px-3 py-2">
+                    {storeReviewError}
+                  </p>
+                )}
+
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="flex items-center gap-2">
                     <input
@@ -923,9 +945,10 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
 
                   <button
                     type="submit"
-                    className="px-5 py-2 bg-neutral-900 hover:bg-black text-white font-semibold rounded-full cursor-pointer"
+                    disabled={isSubmittingStoreReview}
+                    className="px-5 py-2 bg-neutral-900 hover:bg-black disabled:opacity-50 text-white font-semibold rounded-full cursor-pointer"
                   >
-                    Kirim Ulasan
+                    {isSubmittingStoreReview ? 'Mengirim...' : 'Kirim Ulasan'}
                   </button>
                 </div>
               </form>
@@ -1228,6 +1251,16 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
           </div>
         </div>
       )}
+
+      {/* Store Testimonials Dedicated Modal */}
+      <StoreTestimonialsModal
+        isOpen={isTestimonialsModalOpen}
+        onClose={() => setIsTestimonialsModalOpen(false)}
+        storeName={targetBrandName}
+        storeCity={displayCity}
+        testimonials={storeTestimonials}
+        averageRating={averageRating}
+      />
     </div>
   );
 };

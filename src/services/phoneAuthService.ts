@@ -22,6 +22,7 @@ import {
   normalizeEmail,
   findLocalUserByEmail,
 } from '../utils/userDb';
+import { hashPassword, verifyPassword } from '../utils/passwordHash';
 
 declare global {
   interface Window {
@@ -245,23 +246,47 @@ export async function hashEmailKey(email: string): Promise<string> {
   return H.map(v => (v >>> 0).toString(16).padStart(8, '0')).join('');
 }
 
+function normalizePhoneDigits(phone?: string | null): string {
+  const digits = (phone || '').replace(/\D/g, '');
+  if (!digits) return '';
+  if (digits.startsWith('0')) return '62' + digits.slice(1);
+  if (digits.startsWith('62')) return digits;
+  return digits;
+}
+
+function formatFirestoreWriteError(error: unknown, fallbackMessage: string): Error {
+  const errMsg = error instanceof Error ? error.message : String(error);
+  const lower = errMsg.toLowerCase();
+  if (lower.includes('quota') || lower.includes('resource-exhausted')) {
+    return new Error('Batas penggunaan database harian tercapai. Silakan coba beberapa saat lagi.');
+  }
+  if (lower.includes('offline') || lower.includes('network') || lower.includes('unavailable')) {
+    return new Error('Koneksi ke server database gagal. Periksa internet Anda lalu coba lagi.');
+  }
+  if (lower.includes('exceeds the maximum size') || lower.includes('too large')) {
+    return new Error('Ukuran data atau foto profil terlalu besar. Gunakan foto yang lebih kecil.');
+  }
+  if (lower.includes('permission-denied') || lower.includes('missing or insufficient permissions')) {
+    return new Error('Data akun tidak memenuhi aturan validasi server. Periksa panjang nama, email, atau nomor HP.');
+  }
+  return new Error(fallbackMessage);
+}
+
 /**
- * Check if an email address is already registered across local DB and Cloud Firestore
+ * Check if an email address is already registered in Cloud Firestore (with local offline fallback)
  */
 export async function isEmailRegistered(email: string): Promise<boolean> {
   const cleanEmail = normalizeEmail(email);
   if (!cleanEmail) return false;
 
-  // 1. Check local database (includes seeded and locally created accounts)
-  if (findLocalUserByEmail(cleanEmail)) {
-    return true;
-  }
+  let remoteChecked = false;
 
-  // 2. Check immutable email_registry document in Firestore
+  // 1. Check immutable email_registry document in Firestore
   try {
     const emailKey = await hashEmailKey(cleanEmail);
     const regRef = doc(db, 'email_registry', emailKey);
     const regSnap = await getDoc(regRef);
+    remoteChecked = true;
     if (regSnap.exists()) {
       return true;
     }
@@ -269,10 +294,11 @@ export async function isEmailRegistered(email: string): Promise<boolean> {
     console.warn('Could not check Firestore email_registry:', err);
   }
 
-  // 3. Fallback query on users (for any docs created before email_registry)
+  // 2. Fallback query on users (for any docs created before email_registry)
   try {
     const q = query(collection(db, 'users'), where('email', '==', cleanEmail));
     const snap = await getDocs(q);
+    remoteChecked = true;
     if (!snap.empty) {
       return true;
     }
@@ -280,52 +306,197 @@ export async function isEmailRegistered(email: string): Promise<boolean> {
     console.warn('Could not query users by email:', err);
   }
 
+  if (!remoteChecked && findLocalUserByEmail(cleanEmail)) {
+    return true;
+  }
+
   return false;
 }
 
+function sanitizeStringArray(arr: unknown, maxItems: number, maxLen: number): string[] {
+  if (!Array.isArray(arr)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of arr) {
+    if (typeof item !== 'string') continue;
+    const clean = item.trim().slice(0, maxLen);
+    if (!clean || seen.has(clean)) continue;
+    seen.add(clean);
+    out.push(clean);
+    if (out.length >= maxItems) break;
+  }
+  return out;
+}
+
+export function sanitizeBuyerProfile(bp?: UserAccount['buyerProfile'] | null): UserAccount['buyerProfile'] | undefined {
+  if (!bp || typeof bp !== 'object') return undefined;
+  const clean: NonNullable<UserAccount['buyerProfile']> = {
+    city: String(bp.city || 'Jakarta').trim().slice(0, 80),
+    totalOrdersCount: Math.max(0, Number(bp.totalOrdersCount) || 0),
+  };
+  if (typeof bp.address === 'string' && bp.address.trim()) {
+    clean.address = bp.address.trim().slice(0, 400);
+  }
+  if (typeof bp.postalCode === 'string' && bp.postalCode.trim()) {
+    clean.postalCode = bp.postalCode.trim().slice(0, 20);
+  }
+  if (Array.isArray(bp.savedAddresses)) {
+    clean.savedAddresses = sanitizeStringArray(bp.savedAddresses, 10, 400);
+  }
+  if (Array.isArray(bp.wishlistIds)) {
+    clean.wishlistIds = sanitizeStringArray(bp.wishlistIds, 100, 128);
+  }
+  if (Array.isArray(bp.followingStores)) {
+    clean.followingStores = sanitizeStringArray(bp.followingStores, 150, 128);
+  }
+  if (Array.isArray(bp.recentlyViewedIds)) {
+    clean.recentlyViewedIds = sanitizeStringArray(bp.recentlyViewedIds, 20, 128);
+  }
+  return clean;
+}
+
+export function sanitizeSellerProfile(sp?: UserAccount['sellerProfile'] | null): UserAccount['sellerProfile'] | undefined {
+  if (!sp || typeof sp !== 'object') return undefined;
+  const rawPlan = String(sp.planId || 'starter').trim();
+  const safePlanId: 'starter' | 'pro' | 'atelier' =
+    rawPlan === 'pro' || rawPlan === 'atelier' ? rawPlan : 'starter';
+  const clean: NonNullable<UserAccount['sellerProfile']> = {
+    brandName: String(sp.brandName || 'Toko AROOS').trim().slice(0, 100) || 'Toko AROOS',
+    brandCity: String(sp.brandCity || 'Jakarta').trim().slice(0, 80) || 'Jakarta',
+    planId: safePlanId,
+    registeredAt: String(sp.registeredAt || new Date().toISOString().split('T')[0]).slice(0, 64),
+    verifiedBrand: Boolean(sp.verifiedBrand),
+  };
+  if (typeof sp.brandDescription === 'string' && sp.brandDescription.trim()) {
+    clean.brandDescription = sp.brandDescription.trim().slice(0, 1000);
+  }
+  return clean;
+}
+
+export async function syncPublicProfileToFirestore(account: UserAccount): Promise<void> {
+  if (!account.id) return;
+  const nowIso = new Date().toISOString();
+  const city = String(
+    account.buyerProfile?.city || account.sellerProfile?.brandCity || 'Jakarta'
+  )
+    .trim()
+    .slice(0, 80);
+  const safeAvatar =
+    typeof account.avatarUrl === 'string' && account.avatarUrl.length <= 760000
+      ? account.avatarUrl
+      : '';
+  const safeSellerProfile = sanitizeSellerProfile(account.sellerProfile);
+  const followingStores = sanitizeStringArray(account.buyerProfile?.followingStores, 150, 128);
+
+  try {
+    await setDoc(
+      doc(db, 'public_profiles', account.id),
+      {
+        id: account.id,
+        name: String(account.name || 'Pengguna AROOS').trim().slice(0, 80) || 'Pengguna AROOS',
+        avatarUrl: safeAvatar,
+        city,
+        accountStatus: account.accountStatus || 'active',
+        sellerProfile: safeSellerProfile || null,
+        followingStores,
+        createdAt: account.createdAt || nowIso,
+        updatedAt: nowIso,
+      },
+      { merge: true }
+    );
+  } catch (err) {
+    console.warn('Could not sync public_profiles:', err);
+  }
+}
+
 /**
- * Save user profile to Cloud Firestore (with local DB sync)
+ * Save user profile to Cloud Firestore first, then sync to local cache.
+ * Throws if Firestore write fails so accounts never become local-only silently.
  */
 export async function saveUserToFirestore(account: UserAccount): Promise<UserAccount> {
   const path = 'users';
+  const nowIso = new Date().toISOString();
+  const safeAvatar =
+    typeof account.avatarUrl === 'string' && account.avatarUrl.length <= 760000
+      ? account.avatarUrl
+      : '';
+
+  if (typeof account.avatarUrl === 'string' && account.avatarUrl.length > 760000) {
+    throw new Error('Ukuran foto profil terlalu besar. Silakan pilih foto lain yang lebih kecil.');
+  }
+
+  const hashedPassword = account.password
+    ? (await hashPassword(String(account.password))).slice(0, 200)
+    : '';
+
+  const safeBuyerProfile = sanitizeBuyerProfile(account.buyerProfile);
+  const safeSellerProfile = sanitizeSellerProfile(account.sellerProfile);
+
   const normalizedAccount: UserAccount = {
     ...account,
-    email: normalizeEmail(account.email || ''),
+    id: String(account.id).trim().slice(0, 128),
+    name: String(account.name || '').trim().slice(0, 80),
+    email: normalizeEmail(account.email || '').slice(0, 120),
+    phone: String(account.phone || '').trim().slice(0, 30),
+    password: hashedPassword,
+    avatarUrl: safeAvatar,
+    roles: Array.isArray(account.roles) && account.roles.length > 0 ? account.roles.slice(0, 5) : ['buyer', 'seller'],
+    activeRole: account.activeRole === 'seller' ? 'seller' : 'buyer',
+    accountStatus: account.accountStatus || 'active',
+    statusReason: String(account.statusReason || '').slice(0, 300),
+    statusUpdatedAt: account.statusUpdatedAt || account.updatedAt || nowIso,
+    buyerProfile: safeBuyerProfile,
+    sellerProfile: safeSellerProfile,
+    createdAt: account.createdAt || nowIso,
+    updatedAt: nowIso,
   };
 
+  const city = String(
+    normalizedAccount.buyerProfile?.city || normalizedAccount.sellerProfile?.brandCity || 'Jakarta'
+  )
+    .trim()
+    .slice(0, 80);
+
   try {
-    // 1. Sync to local DB for immediate UI reactivity
-    saveUserToDb(normalizedAccount);
-
-    // 2. Persist in Cloud Firestore `users/{userId}`
     const userDocRef = doc(db, path, normalizedAccount.id);
-    await setDoc(userDocRef, {
-      id: normalizedAccount.id,
-      name: normalizedAccount.name || '',
-      avatarUrl: normalizedAccount.avatarUrl || '',
-      phone: normalizedAccount.phone || '',
-      password: normalizedAccount.password || '',
-      email: normalizedAccount.email,
-      city: normalizedAccount.buyerProfile?.city || normalizedAccount.sellerProfile?.brandCity || 'Jakarta',
-      roles: normalizedAccount.roles || ['buyer'],
-      activeRole: normalizedAccount.activeRole || 'buyer',
-      phoneVerified: Boolean(normalizedAccount.phone),
-      buyerProfile: normalizedAccount.buyerProfile || null,
-      sellerProfile: normalizedAccount.sellerProfile || null,
-      accountStatus: normalizedAccount.accountStatus || 'active',
-      statusReason: normalizedAccount.statusReason || '',
-      statusUpdatedAt: normalizedAccount.statusUpdatedAt || normalizedAccount.updatedAt || new Date().toISOString(),
-      createdAt: normalizedAccount.createdAt || new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    }, { merge: true });
+    await setDoc(
+      userDocRef,
+      {
+        id: normalizedAccount.id,
+        name: normalizedAccount.name || 'Pengguna AROOS',
+        avatarUrl: normalizedAccount.avatarUrl || '',
+        phone: normalizedAccount.phone || '',
+        password: normalizedAccount.password || '',
+        email: normalizedAccount.email,
+        city,
+        roles: normalizedAccount.roles,
+        activeRole: normalizedAccount.activeRole,
+        phoneVerified: Boolean(normalizedAccount.phone),
+        buyerProfile: safeBuyerProfile || null,
+        sellerProfile: safeSellerProfile || null,
+        accountStatus: normalizedAccount.accountStatus,
+        statusReason: normalizedAccount.statusReason || '',
+        statusUpdatedAt: normalizedAccount.statusUpdatedAt || nowIso,
+        createdAt: normalizedAccount.createdAt || nowIso,
+        updatedAt: nowIso,
+      },
+      { merge: true }
+    );
 
+    void syncPublicProfileToFirestore(normalizedAccount);
+
+    // Sync to local cache only after Firestore succeeds
+    saveUserToDb(normalizedAccount);
     return normalizedAccount;
   } catch (error) {
-    console.warn('Firestore write warning:', error);
+    console.warn('Firestore user write failed:', error);
     try {
       handleFirestoreError(error, OperationType.WRITE, `users/${normalizedAccount.id}`);
     } catch {}
-    return normalizedAccount;
+    throw formatFirestoreWriteError(
+      error,
+      'Gagal menyimpan akun ke server. Periksa koneksi internet Anda lalu coba lagi.'
+    );
   }
 }
 
@@ -335,17 +506,19 @@ export async function fetchUserByIdFromFirestore(userId: string): Promise<UserAc
   try {
     const snap = await getDoc(doc(db, 'users', cleanId));
     if (snap.exists()) {
-      const data = snap.data() as UserAccount;
+      const data = { ...(snap.data() as UserAccount), id: snap.id };
       saveUserToDb(data);
       return data;
     }
-  } catch {}
-  return getAllUsersFromDb().find((u) => u.id === cleanId) || null;
+    return null;
+  } catch {
+    return getAllUsersFromDb().find((u) => u.id === cleanId) || null;
+  }
 }
 
 export function subscribeToCurrentUserAccount(
   userId: string,
-  onUpdate: (account: UserAccount | null) => void
+  onUpdate: (account: UserAccount | null, meta?: { exists: boolean; fromCache: boolean }) => void
 ): () => void {
   const cleanId = (userId || '').trim();
   if (!cleanId) return () => {};
@@ -354,9 +527,11 @@ export function subscribeToCurrentUserAccount(
       doc(db, 'users', cleanId),
       (snap) => {
         if (snap.exists()) {
-          const data = snap.data() as UserAccount;
-          saveUserToDb({ ...data, id: snap.id });
-          onUpdate({ ...data, id: snap.id });
+          const data = { ...(snap.data() as UserAccount), id: snap.id };
+          saveUserToDb(data);
+          onUpdate(data, { exists: true, fromCache: snap.metadata.fromCache });
+        } else {
+          onUpdate(null, { exists: false, fromCache: snap.metadata.fromCache });
         }
       },
       () => {}
@@ -367,10 +542,10 @@ export function subscribeToCurrentUserAccount(
 }
 
 /**
- * Register a brand-new user account with strict duplicate-email prevention
+ * Register a brand-new user account with strict duplicate-email prevention and guaranteed Firestore persistence
  */
 export async function registerUserWithEmail(account: UserAccount): Promise<UserAccount> {
-  const cleanEmail = normalizeEmail(account.email || '');
+  const cleanEmail = normalizeEmail(account.email || '').slice(0, 120);
   if (!cleanEmail) {
     throw new Error('Alamat email wajib diisi.');
   }
@@ -382,7 +557,10 @@ export async function registerUserWithEmail(account: UserAccount): Promise<UserA
 
   const normalizedAccount: UserAccount = {
     ...account,
+    id: String(account.id).trim().slice(0, 128),
+    name: String(account.name || '').trim().slice(0, 80),
     email: cleanEmail,
+    phone: String(account.phone || '').trim().slice(0, 30),
   };
 
   // Atomically claim email key in Firestore before persisting user profile
@@ -419,82 +597,55 @@ export async function registerUserWithEmail(account: UserAccount): Promise<UserA
         }
       }
     }
-    // If Firestore is offline/unavailable, proceed with local uniqueness already verified above
-    console.warn('Firestore email_registry claim warning:', error);
+    throw formatFirestoreWriteError(
+      error,
+      'Gagal mendaftarkan akun ke server. Periksa koneksi internet Anda lalu coba lagi.'
+    );
   }
 
   return saveUserToFirestore(normalizedAccount);
 }
 
+async function filterByPassword(
+  candidates: UserAccount[],
+  plainPassword: string
+): Promise<UserAccount[]> {
+  const results = await Promise.all(
+    candidates.map(async (u) => ({
+      user: u,
+      ok: await verifyPassword(plainPassword, u.password),
+    }))
+  );
+  return results.filter((r) => r.ok).map((r) => r.user);
+}
+
 /**
- * Find user by email, phone, or unambiguous full name from local DB or Cloud Firestore
+ * Find user by email, phone, or unambiguous full name from Cloud Firestore FIRST
+ * (falling back to local cache only if Firestore cannot be reached).
  */
 export async function findUserInDatabase(
   identifier: string,
   password?: string
 ): Promise<UserAccount | null> {
   const cleanId = identifier.trim().toLowerCase();
-  const cleanPhone = cleanId.replace(/\D/g, '');
+  const cleanPhoneRaw = cleanId.replace(/\D/g, '');
+  const cleanPhoneNormalized = normalizePhoneDigits(identifier);
   if (!cleanId) return null;
 
-  // 1. Check local memory database first
-  const allLocal = getAllUsersFromDb();
+  let firestoreSucceeded = false;
 
-  // Exact email match is always unique
-  if (cleanId.includes('@')) {
-    const emailMatch = allLocal.find((u) => normalizeEmail(u.email || '') === cleanId);
-    if (emailMatch) {
-      return emailMatch;
-    }
-  }
-
-  // Phone match (if identifier looks like a phone number)
-  if (cleanPhone.length >= 8 && !cleanId.includes('@')) {
-    const phoneMatches = allLocal.filter(
-      (u) => u.phone && u.phone.replace(/\D/g, '') === cleanPhone
-    );
-    if (phoneMatches.length === 1) {
-      return phoneMatches[0];
-    }
-    if (phoneMatches.length > 1 && password) {
-      const pwMatches = phoneMatches.filter((u) => u.password === password);
-      if (pwMatches.length === 1) return pwMatches[0];
-      throw new Error('Nomor HP terhubung ke lebih dari satu akun. Silakan masuk menggunakan Email.');
-    }
-  }
-
-  // Name / Brand name match (must not silently pick the wrong account when names collide)
-  if (!cleanId.includes('@')) {
-    const nameMatches = allLocal.filter(
-      (u) =>
-        u.name.trim().toLowerCase() === cleanId ||
-        (u.sellerProfile?.brandName && u.sellerProfile.brandName.trim().toLowerCase() === cleanId)
-    );
-    if (nameMatches.length === 1) {
-      return nameMatches[0];
-    }
-    if (nameMatches.length > 1) {
-      if (password) {
-        const pwMatches = nameMatches.filter((u) => u.password === password);
-        if (pwMatches.length === 1) return pwMatches[0];
-      }
-      throw new Error(
-        'Ditemukan lebih dari satu akun dengan nama tersebut. Silakan masuk menggunakan alamat Email Anda.'
-      );
-    }
-  }
-
-  // 2. Check Firestore via email_registry -> users/{userId} if identifier is an email
+  // 1. Query Cloud Firestore as authoritative cross-device source of truth
   try {
     if (cleanId.includes('@')) {
       const emailKey = await hashEmailKey(cleanId);
       const regSnap = await getDoc(doc(db, 'email_registry', emailKey));
+      firestoreSucceeded = true;
       if (regSnap.exists()) {
         const userId = (regSnap.data() as { userId?: string })?.userId;
         if (userId) {
           const userSnap = await getDoc(doc(db, 'users', userId));
           if (userSnap.exists()) {
-            const docData = userSnap.data() as UserAccount;
+            const docData = { ...(userSnap.data() as UserAccount), id: userSnap.id };
             saveUserToDb(docData);
             return docData;
           }
@@ -504,26 +655,68 @@ export async function findUserInDatabase(
       const q = query(collection(db, 'users'), where('email', '==', cleanId));
       const snap = await getDocs(q);
       if (!snap.empty) {
-        const docData = snap.docs[0].data() as UserAccount;
+        const docData = { ...(snap.docs[0].data() as UserAccount), id: snap.docs[0].id };
         saveUserToDb(docData);
         return docData;
       }
+
+      // Case-insensitive fallback scan for any legacy mixed-case email records
+      const allSnap = await getDocs(collection(db, 'users'));
+      for (const docSnap of allSnap.docs) {
+        const u = docSnap.data() as UserAccount;
+        if (normalizeEmail(u.email || '') === cleanId) {
+          const docData = { ...u, id: docSnap.id };
+          saveUserToDb(docData);
+          return docData;
+        }
+      }
+      return null;
     }
 
-    if (cleanPhone.length >= 8 && !cleanId.includes('@')) {
-      const e164 = formatToE164(cleanPhone);
-      const q = query(collection(db, 'users'), where('phone', 'in', [cleanPhone, e164, identifier.trim()]));
+    if (cleanPhoneRaw.length >= 8 && !cleanId.includes('@')) {
+      const e164 = formatToE164(cleanPhoneRaw);
+      const q = query(
+        collection(db, 'users'),
+        where('phone', 'in', Array.from(new Set([cleanPhoneRaw, e164, identifier.trim()])))
+      );
       const snap = await getDocs(q);
+      firestoreSucceeded = true;
+
       if (snap.size === 1) {
-        const docData = snap.docs[0].data() as UserAccount;
+        const docData = { ...(snap.docs[0].data() as UserAccount), id: snap.docs[0].id };
         saveUserToDb(docData);
         return docData;
       }
       if (snap.size > 1 && password) {
-        const matches = snap.docs.map(d => d.data() as UserAccount).filter(u => u.password === password);
+        const candidates = snap.docs.map((d) => ({ ...(d.data() as UserAccount), id: d.id }));
+        const matches = await filterByPassword(candidates, password);
         if (matches.length === 1) {
           saveUserToDb(matches[0]);
           return matches[0];
+        }
+        throw new Error('Nomor HP terhubung ke lebih dari satu akun. Silakan masuk menggunakan Email.');
+      }
+
+      // Fallback normalized phone scan (handles formatted phones like 0812-3456-7890 or +62 812...)
+      const allSnap = await getDocs(collection(db, 'users'));
+      const phoneMatches: UserAccount[] = [];
+      allSnap.forEach((docSnap) => {
+        const u = docSnap.data() as UserAccount;
+        if (u.phone && normalizePhoneDigits(u.phone) === cleanPhoneNormalized) {
+          phoneMatches.push({ ...u, id: docSnap.id });
+        }
+      });
+      if (phoneMatches.length === 1) {
+        saveUserToDb(phoneMatches[0]);
+        return phoneMatches[0];
+      }
+      if (phoneMatches.length > 1) {
+        if (password) {
+          const pwMatches = await filterByPassword(phoneMatches, password);
+          if (pwMatches.length === 1) {
+            saveUserToDb(pwMatches[0]);
+            return pwMatches[0];
+          }
         }
         throw new Error('Nomor HP terhubung ke lebih dari satu akun. Silakan masuk menggunakan Email.');
       }
@@ -531,6 +724,7 @@ export async function findUserInDatabase(
 
     if (!cleanId.includes('@')) {
       const allSnap = await getDocs(collection(db, 'users'));
+      firestoreSucceeded = true;
       const remoteMatches: UserAccount[] = [];
       allSnap.forEach((docSnap) => {
         const u = docSnap.data() as UserAccount;
@@ -547,7 +741,7 @@ export async function findUserInDatabase(
       }
       if (remoteMatches.length > 1) {
         if (password) {
-          const pwMatches = remoteMatches.filter((u) => u.password === password);
+          const pwMatches = await filterByPassword(remoteMatches, password);
           if (pwMatches.length === 1) {
             saveUserToDb(pwMatches[0]);
             return pwMatches[0];
@@ -559,10 +753,53 @@ export async function findUserInDatabase(
       }
     }
   } catch (err: unknown) {
-    if (err instanceof Error && err.message.includes('Silakan masuk menggunakan')) {
+    if (
+      err instanceof Error &&
+      (err.message.includes('Silakan masuk menggunakan') ||
+        err.message.includes('lebih dari satu akun'))
+    ) {
       throw err;
     }
-    console.warn('Could not query Firestore directly:', err);
+    console.warn('Could not query Firestore directly, falling back to local cache:', err);
+  }
+
+  if (firestoreSucceeded) {
+    return null;
+  }
+
+  // 2. Offline fallback: check local cache only when Firestore is unreachable
+  const allLocal = getAllUsersFromDb();
+
+  if (cleanId.includes('@')) {
+    return allLocal.find((u) => normalizeEmail(u.email || '') === cleanId) || null;
+  }
+
+  if (cleanPhoneRaw.length >= 8 && !cleanId.includes('@')) {
+    const phoneMatches = allLocal.filter(
+      (u) => u.phone && normalizePhoneDigits(u.phone) === cleanPhoneNormalized
+    );
+    if (phoneMatches.length === 1) return phoneMatches[0];
+    if (phoneMatches.length > 1 && password) {
+      const pwMatches = await filterByPassword(phoneMatches, password);
+      if (pwMatches.length === 1) return pwMatches[0];
+      throw new Error('Nomor HP terhubung ke lebih dari satu akun. Silakan masuk menggunakan Email.');
+    }
+  }
+
+  const nameMatches = allLocal.filter(
+    (u) =>
+      u.name.trim().toLowerCase() === cleanId ||
+      (u.sellerProfile?.brandName && u.sellerProfile.brandName.trim().toLowerCase() === cleanId)
+  );
+  if (nameMatches.length === 1) return nameMatches[0];
+  if (nameMatches.length > 1) {
+    if (password) {
+      const pwMatches = await filterByPassword(nameMatches, password);
+      if (pwMatches.length === 1) return pwMatches[0];
+    }
+    throw new Error(
+      'Ditemukan lebih dari satu akun dengan nama tersebut. Silakan masuk menggunakan alamat Email Anda.'
+    );
   }
 
   return null;

@@ -1,4 +1,5 @@
 import { Product, Review, SubscriptionPlan, SocialSyncConfig, Order, NotificationItem, ChatMessage, ChatConversation } from '../types';
+import { PRODUCT_ASSETS } from '../assets/productAssets';
 
 export const INITIAL_PRODUCTS: Product[] = [
   {
@@ -19,10 +20,10 @@ export const INITIAL_PRODUCTS: Product[] = [
     sizes: ['All Size / Oversized'],
     colors: ['Indigo Sogan', 'Sand Natural'],
     material: 'Katun Primisima Cap Halus Tangan',
-    image: '/src/assets/images/product_batik_outer_1792948052474.jpg',
+    image: PRODUCT_ASSETS.productBatikOuter,
     images: [
-      '/src/assets/images/product_batik_outer_1792948052474.jpg',
-      '/src/assets/images/hero_local_fashion_1792948051901.jpg',
+      PRODUCT_ASSETS.productBatikOuter,
+      PRODUCT_ASSETS.heroLocalFashion,
     ],
     condition: 'Baru',
     listingStatus: 'available',
@@ -53,7 +54,7 @@ export const INITIAL_PRODUCTS: Product[] = [
     sizes: ['S', 'M', 'L', 'XL'],
     colors: ['Olive Moss', 'Natural Flax', 'Espresso'],
     material: '100% French Flax Pure Linen 180 GSM',
-    image: '/src/assets/images/product_oversized_linen_1792948053165.jpg',
+    image: PRODUCT_ASSETS.productOversizedLinen,
     condition: 'Baru',
     listingStatus: 'available',
     allowMeetup: true,
@@ -83,7 +84,7 @@ export const INITIAL_PRODUCTS: Product[] = [
     sizes: ['39', '40', '41', '42', '43', '44'],
     colors: ['Raw Canvas Cream', 'Charcoal Vintage'],
     material: 'Heavy 14oz Organic Cotton Canvas & Natural Gum Sole',
-    image: '/src/assets/images/product_canvas_sneakers_1792948053981.jpg',
+    image: PRODUCT_ASSETS.productCanvasSneakers,
     condition: 'Baru',
     listingStatus: 'available',
     allowMeetup: false,
@@ -112,10 +113,10 @@ export const INITIAL_PRODUCTS: Product[] = [
     sizes: ['S', 'M', 'L', 'XL', 'XXL'],
     colors: ['Deep Indigo Raw'],
     material: '14.5oz Unsanforized Shuttle Loom Selvedge Denim',
-    image: '/src/assets/images/product_denim_jacket_1792948053731.jpg',
+    image: PRODUCT_ASSETS.productDenimJacket,
     images: [
-      '/src/assets/images/product_denim_jacket_1792948053731.jpg',
-      '/src/assets/images/hero_local_fashion_1792948051901.jpg',
+      PRODUCT_ASSETS.productDenimJacket,
+      PRODUCT_ASSETS.heroLocalFashion,
     ],
     condition: 'Pre-loved',
     listingStatus: 'available',
@@ -146,7 +147,7 @@ export const INITIAL_PRODUCTS: Product[] = [
     sizes: ['S', 'M', 'L', 'XL'],
     colors: ['Washed Black', 'Bone White', 'Sage Fog'],
     material: '100% Cotton Terry 330 GSM Non-Fleece',
-    image: '/src/assets/images/studio_heavyweight_hoodie_1793086667293.jpg',
+    image: PRODUCT_ASSETS.studioHeavyweightHoodie,
     condition: 'Baru',
     listingStatus: 'available',
     allowMeetup: true,
@@ -175,7 +176,7 @@ export const INITIAL_PRODUCTS: Product[] = [
     sizes: ['28', '30', '32', '34'],
     colors: ['Khaki Camel', 'Midnight Charcoal', 'Off White'],
     material: 'Wool Peach Poly Blend Anti-Wrinkle',
-    image: '/src/assets/images/studio_pleated_trouser_1793086667321.jpg',
+    image: PRODUCT_ASSETS.studioPleatedTrouser,
     condition: 'Pre-loved',
     listingStatus: 'available',
     allowMeetup: true,
@@ -204,7 +205,7 @@ export const INITIAL_PRODUCTS: Product[] = [
     sizes: ['One Size (Adjustable)'],
     colors: ['Washed Black', 'Vintage White'],
     material: '100% Cotton Heavy Twill with Brass Clasp',
-    image: '/src/assets/images/studio_streetwear_cap_1793086667463.jpg',
+    image: PRODUCT_ASSETS.studioStreetwearCap,
     condition: 'Baru',
     listingStatus: 'available',
     allowMeetup: true,
@@ -233,8 +234,8 @@ export const MOCK_REVIEWS: Review[] = [
     helpfulCount: 16,
     userStats: 'TB 175cm · BB 68kg',
     images: [
-      '/src/assets/images/hero_local_fashion_1792948051901.jpg',
-      '/src/assets/images/product_batik_outer_1792948052474.jpg',
+      PRODUCT_ASSETS.heroLocalFashion,
+      PRODUCT_ASSETS.productBatikOuter,
     ],
   },
   {
@@ -265,7 +266,7 @@ export const MOCK_REVIEWS: Review[] = [
     helpfulCount: 24,
     userStats: 'TB 178cm · BB 74kg',
     images: [
-      '/src/assets/images/product_oversized_linen_1792948053165.jpg',
+      PRODUCT_ASSETS.productOversizedLinen,
     ],
   },
   {
@@ -282,7 +283,7 @@ export const MOCK_REVIEWS: Review[] = [
     helpfulCount: 33,
     userStats: 'Panjang Kaki 26.5cm',
     images: [
-      '/src/assets/images/product_canvas_sneakers_1792948053981.jpg',
+      PRODUCT_ASSETS.productCanvasSneakers,
     ],
   },
   {
@@ -299,8 +300,8 @@ export const MOCK_REVIEWS: Review[] = [
     helpfulCount: 19,
     userStats: 'TB 180cm · BB 82kg',
     images: [
-      '/src/assets/images/product_denim_jacket_1792948053731.jpg',
-      '/src/assets/images/hero_local_fashion_1792948051901.jpg',
+      PRODUCT_ASSETS.productDenimJacket,
+      PRODUCT_ASSETS.heroLocalFashion,
     ],
   },
   {
@@ -317,7 +318,7 @@ export const MOCK_REVIEWS: Review[] = [
     helpfulCount: 14,
     userStats: 'TB 173cm · BB 66kg',
     images: [
-      '/src/assets/images/studio_heavyweight_hoodie_1793086667293.jpg',
+      PRODUCT_ASSETS.studioHeavyweightHoodie,
     ],
   },
   {
@@ -334,7 +335,7 @@ export const MOCK_REVIEWS: Review[] = [
     helpfulCount: 22,
     userStats: 'TB 167cm · BB 54kg',
     images: [
-      '/src/assets/images/studio_pleated_trouser_1793086667321.jpg',
+      PRODUCT_ASSETS.studioPleatedTrouser,
     ],
   }
 ];

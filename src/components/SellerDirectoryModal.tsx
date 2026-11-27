@@ -9,6 +9,7 @@ import {
   getStoreFollowerCount,
   isStoreFollowed,
 } from '../utils/marketplaceSocial';
+import { UserAccount, UserProfile } from '../types';
 import {
   AROOS_BACKDROP_TRANSITION,
   AROOS_MODAL_TRANSITION,
@@ -21,7 +22,8 @@ interface SellerDirectoryModalProps {
   sellers: SellerDirectoryEntry[];
   initialQuery?: string;
   followingStores: string[];
-  followerDeltas: Record<string, number>;
+  users?: UserAccount[];
+  currentProfile?: UserProfile;
   onToggleFollow: (brandName: string, sellerId?: string) => void;
   onSelectStore: (brandName: string, sellerId?: string) => void;
 }
@@ -32,7 +34,8 @@ export const SellerDirectoryModal: React.FC<SellerDirectoryModalProps> = ({
   sellers,
   initialQuery = '',
   followingStores,
-  followerDeltas,
+  users = [],
+  currentProfile,
   onToggleFollow,
   onSelectStore,
 }) => {
@@ -227,13 +230,13 @@ export const SellerDirectoryModal: React.FC<SellerDirectoryModalProps> = ({
                       seller.brandName,
                       seller.sellerId
                     );
-                    const followerCount = getStoreFollowerCount(
-                      seller.brandName,
+                    const followerCount = getStoreFollowerCount({
+                      brandName: seller.brandName,
+                      sellerId: seller.sellerId,
+                      users,
+                      currentProfile,
                       followingStores,
-                      followerDeltas,
-                      seller.isCurrentUser,
-                      seller.sellerId
-                    );
+                    });
 
                     return (
                       <div

@@ -24,6 +24,7 @@ import {
 } from '../../services/adminService';
 import { updateUserReportStatus } from '../../services/reportService';
 import { formatPresenceLabel } from '../../services/presenceService';
+import { useConfirm } from '../ConfirmDialogContext';
 
 interface SuperadminPanelProps {
   onLogout: () => void;
@@ -66,6 +67,18 @@ export const SuperadminPanel: React.FC<SuperadminPanelProps> = ({
   onTriggerToast,
 }) => {
   const [activeTab, setActiveTab] = useState<AdminTab>('overview');
+  const confirm = useConfirm();
+
+  const handleLogoutClick = async () => {
+    const ok = await confirm({
+      title: 'Keluar Superadmin',
+      message: 'Apakah Anda yakin ingin mengakhiri sesi Superadmin?',
+      confirmLabel: 'Ya, Keluar',
+      tone: 'danger',
+    });
+    if (!ok) return;
+    onLogout();
+  };
 
   // Users filters & modals
   const [userSearch, setUserSearch] = useState('');
@@ -351,7 +364,7 @@ export const SuperadminPanel: React.FC<SuperadminPanelProps> = ({
 
           <button
             type="button"
-            onClick={onLogout}
+            onClick={handleLogoutClick}
             className="min-h-[38px] px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-white text-xs font-semibold rounded-xl inline-flex items-center gap-1.5 cursor-pointer shrink-0"
           >
             <LogOut className="w-3.5 h-3.5" />
@@ -1027,7 +1040,11 @@ export const SuperadminPanel: React.FC<SuperadminPanelProps> = ({
                       <div className="flex items-center gap-1.5 pt-1">
                         <button
                           type="button"
-                          onClick={() => onToggleProductActive(p.id, p.isActive === false)}
+                          onClick={() =>
+                            void Promise.resolve(
+                              onToggleProductActive(p.id, p.isActive === false)
+                            ).catch(() => {})
+                          }
                           className={`min-h-[32px] px-2.5 py-1 rounded-lg text-[11px] font-semibold cursor-pointer ${
                             p.isActive !== false
                               ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
@@ -1041,7 +1058,7 @@ export const SuperadminPanel: React.FC<SuperadminPanelProps> = ({
                             <button
                               type="button"
                               onClick={() => {
-                                onDeleteProduct(p.id);
+                                void Promise.resolve(onDeleteProduct(p.id)).catch(() => {});
                                 setConfirmDeleteProductId(null);
                               }}
                               className="min-h-[32px] px-2.5 py-1 bg-red-600 text-white rounded-lg text-[11px] font-bold cursor-pointer"

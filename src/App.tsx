@@ -34,15 +34,14 @@ import {
   getStoreFollowingList,
   getStoreUniqueKey,
   isStoreFollowed,
-  loadFollowerDeltas,
   loadFollowingStores,
   loadRecentlyViewedIds,
   normalizeStoreKey,
   pushRecentlyViewedId,
   saveFollowingStores,
   saveRecentlyViewedIds,
-  updateFollowerDelta,
 } from './utils/marketplaceSocial';
+import { resolveBundledAssetList, resolveBundledAssetUrl } from './assets/productAssets';
 import {
   AROOS_PAGE_TRANSITION,
   AROOS_PAGE_VARIANTS,
@@ -193,16 +192,23 @@ export default function App() {
       }
       
       const initialMap = new Map(INITIAL_PRODUCTS.map(p => [p.id, p]));
-      const sanitized = parsed.map((p: Product) => {
+      const sanitized: Product[] = parsed.map((p: Product): Product => {
         const base = initialMap.get(p.id);
         if (base) {
+          const resolvedImg = resolveBundledAssetUrl(p.image);
+          const useBaseImg =
+            !resolvedImg ||
+            resolvedImg.startsWith('http') ||
+            resolvedImg.includes('unsplash') ||
+            p.id === 'prod-005' ||
+            p.id === 'prod-006';
           return {
             ...base,
             ...p,
-            image: (!p.image || p.image.startsWith('http') || p.image.includes('unsplash') || p.id === 'prod-005' || p.id === 'prod-006') ? base.image : p.image,
+            image: useBaseImg ? base.image : resolvedImg,
             condition: p.condition || base.condition,
             listingStatus: p.listingStatus || base.listingStatus || 'available',
-            images: p.images || base.images,
+            images: p.images ? resolveBundledAssetList(p.images) : base.images,
             allowMeetup: p.allowMeetup ?? base.allowMeetup,
             meetupArea: p.meetupArea || base.meetupArea,
             createdAt: p.createdAt || base.createdAt,
@@ -213,7 +219,11 @@ export default function App() {
             itemBrand: p.itemBrand || base.itemBrand,
           };
         }
-        return p;
+        return {
+          ...p,
+          image: resolveBundledAssetUrl(p.image) || p.image,
+          images: p.images ? resolveBundledAssetList(p.images) : p.images,
+        };
       });
 
       INITIAL_PRODUCTS.forEach(ip => {
@@ -292,6 +302,24 @@ export default function App() {
     return matched;
   }, [allLiveOrders, userProfile]);
 
+  const { purchasedProductIds, pendingPurchaseProductIds } = useMemo(() => {
+    const completed = new Set<string>();
+    const pending = new Set<string>();
+    if (!userProfile.isRegistered) {
+      return { purchasedProductIds: completed, pendingPurchaseProductIds: pending };
+    }
+    buyerOrders.forEach((order) => {
+      const itemIds = (order.items || []).map((item) => item.productId).filter(Boolean);
+      if (order.orderStatus === 'selesai') {
+        itemIds.forEach((id) => completed.add(id));
+      } else {
+        itemIds.forEach((id) => pending.add(id));
+      }
+    });
+    completed.forEach((id) => pending.delete(id));
+    return { purchasedProductIds: completed, pendingPurchaseProductIds: pending };
+  }, [buyerOrders, userProfile.isRegistered]);
+
   const sellerIncomingOrders = useMemo(() => {
     if (!userProfile.isRegistered) return [];
     const matched = allLiveOrders.filter((o) => isOrderForSeller(o, userProfile));
@@ -347,21 +375,27 @@ export default function App() {
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [sortBy, setSortBy] = useState<'baru' | 'murah' | 'mahal' | 'lama'>('baru');
 
-  // Wishlist State with per-account LocalStorage Persistence
-  const [wishlistIds, setWishlistIds] = useState<string[]>(() => loadAccountWishlist(currentUserAccount?.id));
+  // Wishlist State with per-account LocalStorage + Firestore Persistence
+  const [wishlistIds, setWishlistIds] = useState<string[]>(() => {
+    const remote = currentUserAccount?.buyerProfile?.wishlistIds;
+    return Array.isArray(remote) ? remote : loadAccountWishlist(currentUserAccount?.id);
+  });
   const [isWishlistOnly, setIsWishlistOnly] = useState<boolean>(false);
 
   // Social Follow & Recently Viewed States
-  const [followingStores, setFollowingStores] = useState<string[]>(() =>
-    loadFollowingStores(currentUserAccount?.id)
-  );
-  const [followerDeltas, setFollowerDeltas] = useState<Record<string, number>>(() =>
-    loadFollowerDeltas()
-  );
+  const [followingStores, setFollowingStores] = useState<string[]>(() => {
+    const remote = currentUserAccount?.buyerProfile?.followingStores;
+    return Array.isArray(remote) ? remote : loadFollowingStores(currentUserAccount?.id);
+  });
   const [isFollowingOnly, setIsFollowingOnly] = useState<boolean>(false);
-  const [recentlyViewedIds, setRecentlyViewedIds] = useState<string[]>(() =>
-    loadRecentlyViewedIds(currentUserAccount?.id)
-  );
+  const [recentlyViewedIds, setRecentlyViewedIds] = useState<string[]>(() => {
+    const remote = currentUserAccount?.buyerProfile?.recentlyViewedIds;
+    return Array.isArray(remote) ? remote : loadRecentlyViewedIds(currentUserAccount?.id);
+  });
+  const currentUserAccountRef = useRef<UserAccount | null>(currentUserAccount);
+  useEffect(() => {
+    currentUserAccountRef.current = currentUserAccount;
+  }, [currentUserAccount]);
   const [isCatalogSearchFocused, setIsCatalogSearchFocused] = useState<boolean>(false);
   const catalogSearchBoxRef = useRef<HTMLDivElement | null>(null);
   const recentlyViewedSectionRef = useRef<HTMLDivElement | null>(null);
@@ -428,17 +462,10 @@ export default function App() {
   const [unreadChatCount, setUnreadChatCount] = useState<number>(0);
   const [liveConversations, setLiveConversations] = useState<ChatConversation[]>([]);
 
-  const requireAuth = (
-    intent: PendingAuthIntent,
-    toastTitle?: string,
-    toastMessage?: string
-  ): boolean => {
+  const requireAuth = (intent: PendingAuthIntent): boolean => {
     if (userProfile.isRegistered) return true;
     setPendingAuthIntent(intent);
     openAuthModal('login');
-    if (toastTitle && toastMessage) {
-      triggerToast(toastTitle, toastMessage, 'system');
-    }
     return false;
   };
 
@@ -448,11 +475,12 @@ export default function App() {
     targetSellerId?: string
   ) => {
     if (
-      !requireAuth(
-        { type: 'chat', storeName: storeName || '', productContext, sellerId: targetSellerId },
-        'Masuk untuk Chat Penjual',
-        'Silakan masuk akun terlebih dahulu untuk menghubungi penjual.'
-      )
+      !requireAuth({
+        type: 'chat',
+        storeName: storeName || '',
+        productContext,
+        sellerId: targetSellerId,
+      })
     ) {
       return;
     }
@@ -516,25 +544,59 @@ export default function App() {
     };
   }, []);
 
-  // Enforce blocked/banned user restriction in real time
+  // Enforce blocked/banned/deleted user restriction in real time
   useEffect(() => {
     if (!currentUserAccount?.id) return;
-    const unsubscribe = subscribeToCurrentUserAccount(currentUserAccount.id, (remoteAccount) => {
-      if (!remoteAccount) return;
-      if (remoteAccount.accountStatus === 'blocked' || remoteAccount.accountStatus === 'banned') {
-        const prefix =
-          remoteAccount.accountStatus === 'banned'
-            ? 'Akun Anda telah dibanned permanen oleh admin.'
-            : 'Akun Anda diblokir oleh admin.';
-        const reason = remoteAccount.statusReason ? ` (${remoteAccount.statusReason})` : '';
-        handleLogout();
-        triggerToast('Akses Akun Dibatasi', `${prefix}${reason}`, 'system', false);
-        return;
+    const unsubscribe = subscribeToCurrentUserAccount(
+      currentUserAccount.id,
+      (remoteAccount, meta) => {
+        if (!remoteAccount) {
+          if (meta && !meta.exists && !meta.fromCache) {
+            handleLogout();
+            triggerToast(
+              'Sesi Akun Tidak Ditemukan',
+              'Akun Anda belum tersinkron atau telah dihapus di server. Silakan masuk atau daftar ulang.',
+              'system',
+              false
+            );
+          }
+          return;
+        }
+        if (remoteAccount.accountStatus === 'blocked' || remoteAccount.accountStatus === 'banned') {
+          const prefix =
+            remoteAccount.accountStatus === 'banned'
+              ? 'Akun Anda telah dibanned permanen oleh admin.'
+              : 'Akun Anda diblokir oleh admin.';
+          const reason = remoteAccount.statusReason ? ` (${remoteAccount.statusReason})` : '';
+          handleLogout();
+          triggerToast('Akses Akun Dibatasi', `${prefix}${reason}`, 'system', false);
+          return;
+        }
+        currentUserAccountRef.current = remoteAccount;
+        setCurrentUserAccountState(remoteAccount);
+        setCurrentUserAccount(remoteAccount);
+        setUserProfile(userAccountToProfile(remoteAccount));
+
+        if (Array.isArray(remoteAccount.buyerProfile?.wishlistIds)) {
+          const remoteW = remoteAccount.buyerProfile.wishlistIds;
+          setWishlistIds((prev) =>
+            prev.length === remoteW.length && prev.every((v, i) => v === remoteW[i]) ? prev : remoteW
+          );
+        }
+        if (Array.isArray(remoteAccount.buyerProfile?.followingStores)) {
+          const remoteF = remoteAccount.buyerProfile.followingStores;
+          setFollowingStores((prev) =>
+            prev.length === remoteF.length && prev.every((v, i) => v === remoteF[i]) ? prev : remoteF
+          );
+        }
+        if (Array.isArray(remoteAccount.buyerProfile?.recentlyViewedIds)) {
+          const remoteR = remoteAccount.buyerProfile.recentlyViewedIds;
+          setRecentlyViewedIds((prev) =>
+            prev.length === remoteR.length && prev.every((v, i) => v === remoteR[i]) ? prev : remoteR
+          );
+        }
       }
-      setCurrentUserAccountState(remoteAccount);
-      setCurrentUserAccount(remoteAccount);
-      setUserProfile(userAccountToProfile(remoteAccount));
-    });
+    );
     return () => unsubscribe();
   }, [currentUserAccount?.id]);
 
@@ -658,15 +720,41 @@ export default function App() {
     };
   }, []);
 
+  const persistBuyerSocialFields = async (patch: {
+    wishlistIds?: string[];
+    followingStores?: string[];
+    recentlyViewedIds?: string[];
+  }): Promise<UserAccount | null> => {
+    const baseAccount = currentUserAccountRef.current;
+    if (!baseAccount) return null;
+    const nextAccount: UserAccount = {
+      ...baseAccount,
+      buyerProfile: {
+        city: baseAccount.buyerProfile?.city || 'Jakarta',
+        ...baseAccount.buyerProfile,
+        ...patch,
+      },
+    };
+    const saved = await saveUserToFirestore(nextAccount);
+    currentUserAccountRef.current = saved;
+    setCurrentUserAccountState(saved);
+    setCurrentUserAccount(saved);
+    setUserProfile(userAccountToProfile(saved));
+    return saved;
+  };
+
   // Handle successful unified account auth/registration
   const handleAuthSuccess = (account: UserAccount) => {
-    setCurrentUserAccountState(account);
-    setCurrentUserAccount(account);
     const profile = userAccountToProfile(account);
-    setUserProfile(profile);
     setSessionNotifications([]);
 
-    let nextWishlist = loadAccountWishlist(account.id);
+    const hasRemoteWishlist = Array.isArray(account.buyerProfile?.wishlistIds);
+    const localWishlist = loadAccountWishlist(account.id);
+    let nextWishlist = hasRemoteWishlist
+      ? (account.buyerProfile?.wishlistIds || [])
+      : localWishlist;
+    let shouldSyncSocialToFirestore =
+      (!hasRemoteWishlist && localWishlist.length > 0);
     let skippedOwnWishlist = false;
     if (pendingAuthIntent?.type === 'wishlist') {
       if (isProductOwnedByUser(pendingAuthIntent.product, profile)) {
@@ -675,32 +763,81 @@ export default function App() {
         const pid = pendingAuthIntent.product.id;
         if (!nextWishlist.includes(pid)) {
           nextWishlist = [...nextWishlist, pid];
+          shouldSyncSocialToFirestore = true;
           const currentLikes = Math.max(0, Number(pendingAuthIntent.product.likesCount) || 0);
           const nextLikes = currentLikes + 1;
           setProducts(prev =>
             prev.map(p => (p.id === pid ? { ...p, likesCount: nextLikes } : p))
           );
-          void updateProductListingInFirestore(pid, { likesCount: nextLikes });
+          void toggleProductLikesTransaction(pid, 1, currentLikes).then((serverLikes) => {
+            setProducts(prev =>
+              prev.map(p => (p.id === pid ? { ...p, likesCount: serverLikes } : p))
+            );
+          }).catch(() => {});
         }
       }
     }
     setWishlistIds(nextWishlist);
 
-    let nextFollowing = loadFollowingStores(account.id);
+    const hasRemoteFollowing = Array.isArray(account.buyerProfile?.followingStores);
+    const localFollowing = loadFollowingStores(account.id);
+    let nextFollowing = hasRemoteFollowing
+      ? (account.buyerProfile?.followingStores || [])
+      : localFollowing;
+    if (!hasRemoteFollowing && localFollowing.length > 0) {
+      shouldSyncSocialToFirestore = true;
+    }
     const intent = pendingAuthIntent;
     if (intent?.type === 'follow') {
       const targetKey = getStoreUniqueKey(intent.brandName, intent.sellerId);
       const isSelf = isStoreOwnedByUser(intent.brandName, intent.sellerId, profile);
       if (targetKey && !isSelf && !isStoreFollowed(nextFollowing, intent.brandName, intent.sellerId)) {
         nextFollowing = [...nextFollowing, targetKey];
-        setFollowerDeltas(updateFollowerDelta(intent.brandName, 1, intent.sellerId));
+        shouldSyncSocialToFirestore = true;
       }
     }
     setFollowingStores(nextFollowing);
 
-    const accountRecent = loadRecentlyViewedIds(account.id);
+    const remoteRecent = Array.isArray(account.buyerProfile?.recentlyViewedIds)
+      ? account.buyerProfile.recentlyViewedIds
+      : [];
+    const accountRecent = remoteRecent.length > 0 ? remoteRecent : loadRecentlyViewedIds(account.id);
     const mergedRecent = Array.from(new Set([...recentlyViewedIds, ...accountRecent])).slice(0, 12);
+    if (
+      mergedRecent.length !== remoteRecent.length ||
+      mergedRecent.some((v, idx) => v !== remoteRecent[idx])
+    ) {
+      shouldSyncSocialToFirestore = true;
+    }
     setRecentlyViewedIds(mergedRecent);
+
+    const syncedAccount: UserAccount = {
+      ...account,
+      buyerProfile: {
+        city: account.buyerProfile?.city || 'Jakarta',
+        ...account.buyerProfile,
+        wishlistIds: nextWishlist,
+        followingStores: nextFollowing,
+        recentlyViewedIds: mergedRecent,
+      },
+    };
+    currentUserAccountRef.current = syncedAccount;
+    setCurrentUserAccountState(syncedAccount);
+    setCurrentUserAccount(syncedAccount);
+    setUserProfile(userAccountToProfile(syncedAccount));
+
+    if (shouldSyncSocialToFirestore) {
+      void saveUserToFirestore(syncedAccount)
+        .then((saved) => {
+          currentUserAccountRef.current = saved;
+          setCurrentUserAccountState(saved);
+          setCurrentUserAccount(saved);
+          setUserProfile(userAccountToProfile(saved));
+        })
+        .catch((err) => {
+          console.warn('Gagal menyinkronkan data sosial saat login:', err);
+        });
+    }
 
     setIsUserAuthOpen(false);
     setPendingAuthIntent(null);
@@ -754,14 +891,14 @@ export default function App() {
         triggerToast('Listing Milik Anda', 'Anda tidak dapat menulis ulasan pada produk Anda sendiri.', 'system');
       } else {
         handleSelectProduct(intent.product);
-        triggerToast('Akun Aktif', `Halo ${account.name}, silakan tulis ulasan Anda untuk ${intent.product.name}.`, 'system');
+        triggerToast('Akun Aktif', `Selamat datang, ${account.name}.`, 'system');
       }
     } else if (intent?.type === 'store_review') {
       if (intent.storeTarget) {
         setSelectedStoreTarget(intent.storeTarget);
         setActiveMode('profile');
       }
-      triggerToast('Akun Aktif', `Halo ${account.name}, silakan tulis ulasan & foto untuk toko ini.`, 'system');
+      triggerToast('Akun Aktif', `Selamat datang, ${account.name}.`, 'system');
     } else {
       triggerToast(
         'Selamat Datang di AROOS',
@@ -775,6 +912,7 @@ export default function App() {
     if (currentUserAccount?.id) {
       void updateUserPresence(currentUserAccount.id, false);
     }
+    currentUserAccountRef.current = null;
     setCurrentUserAccountState(null);
     setCurrentUserAccount(null);
     const profile = userAccountToProfile(null);
@@ -904,41 +1042,50 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const handleToggleWishlist = (product: Product, e: React.MouseEvent) => {
+  const handleToggleWishlist = async (product: Product, e: React.MouseEvent) => {
     e.stopPropagation();
     if (isProductOwnedByUser(product, userProfile)) {
       triggerToast('Listing Milik Anda', 'Anda tidak dapat menyimpan listing milik Anda sendiri ke Wishlist.', 'system');
       return;
     }
-    if (
-      !requireAuth(
-        { type: 'wishlist', product },
-        'Masuk untuk Simpan Wishlist',
-        `Masuk akun terlebih dahulu untuk menyimpan ${product.name} ke Wishlist.`
-      )
-    ) {
+    if (!requireAuth({ type: 'wishlist', product })) {
       return;
     }
 
-    const isSaved = wishlistIds.includes(product.id);
+    const prevWishlist = wishlistIds;
+    const isSaved = prevWishlist.includes(product.id);
     const delta: 1 | -1 = isSaved ? -1 : 1;
     const currentLikes = Math.max(0, Number(product.likesCount) || 0);
     const optimisticLikes = Math.max(0, currentLikes + delta);
+    const nextWishlist = isSaved
+      ? prevWishlist.filter((id) => id !== product.id)
+      : Array.from(new Set([...prevWishlist, product.id]));
 
-    if (isSaved) {
-      setWishlistIds(prev => prev.filter(id => id !== product.id));
-    } else {
-      setWishlistIds(prev => [...prev, product.id]);
-    }
-
-    setProducts(prev =>
-      prev.map(p => (p.id === product.id ? { ...p, likesCount: optimisticLikes } : p))
+    setWishlistIds(nextWishlist);
+    setProducts((prev) =>
+      prev.map((p) => (p.id === product.id ? { ...p, likesCount: optimisticLikes } : p))
     );
-    void toggleProductLikesTransaction(product.id, delta, currentLikes).then((serverLikes) => {
-      setProducts(prev =>
-        prev.map(p => (p.id === product.id ? { ...p, likesCount: serverLikes } : p))
+
+    try {
+      const [serverLikes] = await Promise.all([
+        toggleProductLikesTransaction(product.id, delta, currentLikes),
+        persistBuyerSocialFields({ wishlistIds: nextWishlist }),
+      ]);
+      setProducts((prev) =>
+        prev.map((p) => (p.id === product.id ? { ...p, likesCount: serverLikes } : p))
       );
-    });
+    } catch (err) {
+      setWishlistIds(prevWishlist);
+      setProducts((prev) =>
+        prev.map((p) => (p.id === product.id ? { ...p, likesCount: currentLikes } : p))
+      );
+      triggerToast(
+        'Gagal Menyimpan Wishlist',
+        err instanceof Error ? err.message : 'Gagal menyinkronkan wishlist ke server.',
+        'system',
+        false
+      );
+    }
   };
 
   // Save/update user shipping address from Profile or Chat "Alamat Saya"
@@ -961,12 +1108,22 @@ export default function App() {
         postalCode: payload.postalCode || '',
       },
     };
-    setCurrentUserAccountState(updatedAccount);
-    setCurrentUserAccount(updatedAccount);
-    setUserProfile(userAccountToProfile(updatedAccount));
-    await saveUserToFirestore(updatedAccount);
-    triggerToast('Alamat Tersimpan', 'Alamat lengkap Anda telah disimpan ke profil.', 'system', false);
-    return updatedAccount;
+    try {
+      await saveUserToFirestore(updatedAccount);
+      setCurrentUserAccountState(updatedAccount);
+      setCurrentUserAccount(updatedAccount);
+      setUserProfile(userAccountToProfile(updatedAccount));
+      triggerToast('Alamat Tersimpan', 'Alamat lengkap Anda telah disimpan ke profil.', 'system', false);
+      return updatedAccount;
+    } catch (err) {
+      triggerToast(
+        'Gagal Menyimpan Alamat',
+        err instanceof Error ? err.message : 'Gagal menyinkronkan alamat ke server.',
+        'system',
+        false
+      );
+      throw err;
+    }
   };
 
   // Direct Chat Deal Recording (No Payment Gateway, No Escrow)
@@ -1096,7 +1253,7 @@ export default function App() {
         orderId: newOrder.id,
         targetRole: 'seller',
         createdAtIso: nowIso,
-      });
+      }).catch((err) => console.warn('Notifikasi seller gagal dikirim:', err));
     }
 
     if (resolvedBuyerId) {
@@ -1111,7 +1268,7 @@ export default function App() {
         orderId: newOrder.id,
         targetRole: 'buyer',
         createdAtIso: nowIso,
-      });
+      }).catch((err) => console.warn('Notifikasi buyer gagal dikirim:', err));
     }
 
     triggerToast(
@@ -1137,11 +1294,26 @@ export default function App() {
   // Buyer Confirm Received (Direct Deal Completion) -> Trigger Post-Order Review Popup
   const handleConfirmOrderReceived = async (orderId: string) => {
     const target = buyerOrders.find(o => o.id === orderId) || allLiveOrders.find(o => o.id === orderId);
-    await updateOrderInFirestore(orderId, {
-      orderStatus: 'selesai',
-      paymentStatus: 'paid',
-      buyerConfirmedAt: 'Baru saja',
-    });
+    try {
+      await updateOrderInFirestore(orderId, {
+        orderStatus: 'selesai',
+        paymentStatus: 'paid',
+        buyerConfirmedAt: 'Baru saja',
+      });
+      const localUpdated = getLocalSharedOrders();
+      if (target && !localUpdated.some((o) => o.id === orderId)) {
+        setAllLiveOrders([
+          { ...target, orderStatus: 'selesai', paymentStatus: 'paid', buyerConfirmedAt: 'Baru saja' },
+          ...localUpdated,
+        ]);
+      } else {
+        setAllLiveOrders(localUpdated);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Gagal memperbarui status pesanan ke server.';
+      triggerToast('Konfirmasi Pesanan Gagal', msg, 'system', false);
+      throw err;
+    }
 
     if (target && (target.sellerId || target.sellerBrandName)) {
       await createNotificationInFirestore({
@@ -1156,7 +1328,7 @@ export default function App() {
         orderId: target.id,
         targetRole: 'seller',
         createdAtIso: new Date().toISOString(),
-      });
+      }).catch((err) => console.warn('Notifikasi selesai gagal dikirim:', err));
     }
 
     triggerToast(
@@ -1187,12 +1359,18 @@ export default function App() {
     const nextTracking = trackingNumber ?? target?.trackingNumber;
     const nextCourier = courier !== undefined ? courier : target?.courier;
 
-    await updateOrderInFirestore(orderId, {
-      orderStatus: newStatus,
-      trackingNumber: nextTracking,
-      courier: nextCourier,
-    });
-    setAllLiveOrders(getLocalSharedOrders());
+    try {
+      await updateOrderInFirestore(orderId, {
+        orderStatus: newStatus,
+        trackingNumber: nextTracking,
+        courier: nextCourier,
+      });
+      setAllLiveOrders(getLocalSharedOrders());
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Gagal memperbarui status pengiriman ke server.';
+      triggerToast('Gagal Memperbarui Pengiriman', msg, 'system', false);
+      throw err;
+    }
 
     if (target?.buyerId) {
       await createNotificationInFirestore({
@@ -1206,7 +1384,7 @@ export default function App() {
         orderId: target.id,
         targetRole: 'buyer',
         createdAtIso: new Date().toISOString(),
-      });
+      }).catch((err) => console.warn('Notifikasi pengiriman gagal dikirim:', err));
     }
 
     triggerToast(
@@ -1336,7 +1514,7 @@ export default function App() {
         orderId: newOrder.id,
         targetRole: 'buyer',
         createdAtIso: nowIso,
-      });
+      }).catch((err) => console.warn('Notifikasi pesanan manual gagal dikirim:', err));
     }
 
     triggerToast(
@@ -1350,58 +1528,74 @@ export default function App() {
   };
 
   // Listing Controls (Synced to Cloud Firestore & Local)
-  const handleUpdateProductListing = (productId: string, updates: Partial<Product>) => {
+  const handleUpdateProductListing = async (productId: string, updates: Partial<Product>) => {
+    await updateProductListingInFirestore(productId, updates);
     setProducts(prev => prev.map(p => p.id === productId ? { ...p, ...updates } : p));
-    updateProductListingInFirestore(productId, updates);
   };
 
-  const handleReserveProduct = (
+  const handleReserveProduct = async (
     productId: string,
     buyer?: { id?: string; name: string }
   ) => {
     const reservedName = (buyer?.name || '').trim().slice(0, 100);
     const reservedId = (buyer?.id || '').trim().slice(0, 128);
-    handleUpdateProductListing(productId, {
-      listingStatus: 'reserved',
-      reservedByUserId: reservedId,
-      reservedByUserName: reservedName,
-    });
-
-    if (reservedId && reservedId !== userProfile.id) {
-      const targetProd = products.find((p) => p.id === productId);
-      void createNotificationInFirestore({
-        id: `notif-rsv-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        type: 'order',
-        title: 'Produk Di-reserve Untuk Anda',
-        message: `${userProfile.brandName || userProfile.name || 'Penjual'} menandai "${targetProd?.name || 'Produk'}" sebagai Reserved untuk Anda.`,
-        time: 'Baru saja',
-        read: false,
-        recipientUserId: reservedId,
-        targetRole: 'buyer',
-        createdAtIso: new Date().toISOString(),
+    try {
+      await handleUpdateProductListing(productId, {
+        listingStatus: 'reserved',
+        reservedByUserId: reservedId,
+        reservedByUserName: reservedName,
       });
-    }
 
-    triggerToast(
-      'Item Ditandai Reserved',
-      reservedName
-        ? `Produk diperbarui menjadi Reserved khusus untuk ${reservedName}.`
-        : 'Status produk diperbarui menjadi Reserved.',
-      'system'
-    );
+      if (reservedId && reservedId !== userProfile.id) {
+        const targetProd = products.find((p) => p.id === productId);
+        void createNotificationInFirestore({
+          id: `notif-rsv-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          type: 'order',
+          title: 'Produk Di-reserve Untuk Anda',
+          message: `${userProfile.brandName || userProfile.name || 'Penjual'} menandai "${targetProd?.name || 'Produk'}" sebagai Reserved untuk Anda.`,
+          time: 'Baru saja',
+          read: false,
+          recipientUserId: reservedId,
+          targetRole: 'buyer',
+          createdAtIso: new Date().toISOString(),
+        });
+      }
+
+      triggerToast(
+        'Item Ditandai Reserved',
+        reservedName
+          ? `Produk diperbarui menjadi Reserved khusus untuk ${reservedName}.`
+          : 'Status produk diperbarui menjadi Reserved.',
+        'system'
+      );
+    } catch (err) {
+      triggerToast(
+        'Gagal Memperbarui Status',
+        err instanceof Error ? err.message : 'Gagal menyinkronkan status ke server.',
+        'system'
+      );
+    }
   };
 
-  const handleUnreserveProduct = (productId: string) => {
-    handleUpdateProductListing(productId, {
-      listingStatus: 'available',
-      reservedByUserId: '',
-      reservedByUserName: '',
-    });
-    triggerToast(
-      'Status Reserved Dilepas',
-      'Produk kini kembali berstatus Tersedia (Available) di katalog.',
-      'system'
-    );
+  const handleUnreserveProduct = async (productId: string) => {
+    try {
+      await handleUpdateProductListing(productId, {
+        listingStatus: 'available',
+        reservedByUserId: '',
+        reservedByUserName: '',
+      });
+      triggerToast(
+        'Status Reserved Dilepas',
+        'Produk kini kembali berstatus Tersedia (Available) di katalog.',
+        'system'
+      );
+    } catch (err) {
+      triggerToast(
+        'Gagal Melepas Reservasi',
+        err instanceof Error ? err.message : 'Gagal menyinkronkan status ke server.',
+        'system'
+      );
+    }
   };
 
   const syncUrlParams = (updates: {
@@ -1429,7 +1623,11 @@ export default function App() {
 
   const handleSelectProduct = (product: Product) => {
     setSelectedProduct(product);
-    setRecentlyViewedIds((prev) => pushRecentlyViewedId(prev, product.id));
+    const nextRecent = pushRecentlyViewedId(recentlyViewedIds, product.id);
+    setRecentlyViewedIds(nextRecent);
+    if (userProfile.isRegistered && currentUserAccountRef.current) {
+      void persistBuyerSocialFields({ recentlyViewedIds: nextRecent }).catch(() => {});
+    }
     syncUrlParams({ item: product.id, toko: null, sid: null });
   };
 
@@ -1459,14 +1657,8 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const handleToggleFollowStore = (brandName: string, sellerId?: string) => {
-    if (
-      !requireAuth(
-        { type: 'follow', brandName, sellerId },
-        'Masuk untuk Ikuti Lapak',
-        `Masuk akun terlebih dahulu untuk mengikuti ${brandName}.`
-      )
-    ) {
+  const handleToggleFollowStore = async (brandName: string, sellerId?: string) => {
+    if (!requireAuth({ type: 'follow', brandName, sellerId })) {
       return;
     }
 
@@ -1476,18 +1668,30 @@ export default function App() {
     }
 
     const storeKey = getStoreUniqueKey(brandName, sellerId);
-    const isFollowed = isStoreFollowed(followingStores, brandName, sellerId);
-    if (isFollowed) {
-      const nameKey = normalizeStoreKey(brandName);
-      setFollowingStores((prev) =>
-        prev.filter((k) => k !== storeKey && (sellerId ? true : k !== nameKey))
+    const prevFollowing = followingStores;
+    const isFollowed = isStoreFollowed(prevFollowing, brandName, sellerId);
+    const nameKey = normalizeStoreKey(brandName);
+    const nextFollowing = isFollowed
+      ? prevFollowing.filter((k) => k !== storeKey && (sellerId ? true : k !== nameKey))
+      : Array.from(new Set([...prevFollowing, storeKey]));
+
+    setFollowingStores(nextFollowing);
+
+    try {
+      await persistBuyerSocialFields({ followingStores: nextFollowing });
+      if (isFollowed) {
+        triggerToast('Berhenti Mengikuti', `Anda berhenti mengikuti ${brandName}.`, 'system');
+      } else {
+        triggerToast('Berhasil Mengikuti', `Anda kini mengikuti ${brandName}.`, 'system');
+      }
+    } catch (err) {
+      setFollowingStores(prevFollowing);
+      triggerToast(
+        'Gagal Memperbarui Status Ikuti',
+        err instanceof Error ? err.message : 'Gagal menyinkronkan ke server.',
+        'system',
+        false
       );
-      setFollowerDeltas(updateFollowerDelta(brandName, -1, sellerId));
-      triggerToast('Berhenti Mengikuti', `Anda berhenti mengikuti ${brandName}.`, 'system');
-    } else {
-      setFollowingStores((prev) => [...prev, storeKey]);
-      setFollowerDeltas(updateFollowerDelta(brandName, 1, sellerId));
-      triggerToast('Berhasil Mengikuti', `Anda kini mengikuti ${brandName}.`, 'system');
     }
   };
 
@@ -1517,9 +1721,11 @@ export default function App() {
     } catch {}
   }, [products]);
 
-  const handleAddProduct = (newProduct: Product) => {
-    setProducts(prev => [newProduct, ...prev]);
-    saveProductToFirestore(newProduct);
+  const handleAddProduct = async (newProduct: Product) => {
+    await saveProductToFirestore(newProduct);
+    setProducts(prev =>
+      prev.some(p => p.id === newProduct.id) ? prev : [newProduct, ...prev]
+    );
 
     if (newProduct.isActive !== false) {
       handleClearAiSearch();
@@ -1534,28 +1740,82 @@ export default function App() {
     }
   };
 
-  const handleToggleProductActive = (productId: string, newActiveState: boolean) => {
-    setProducts(prev => prev.map(p => p.id === productId ? { ...p, isActive: newActiveState } : p));
-    toggleProductActiveStatus(productId, newActiveState);
+  const handleToggleProductActive = async (productId: string, newActiveState: boolean) => {
+    try {
+      await toggleProductActiveStatus(productId, newActiveState);
+      setProducts(prev => prev.map(p => p.id === productId ? { ...p, isActive: newActiveState } : p));
+    } catch (err) {
+      triggerToast(
+        'Gagal Mengubah Visibilitas',
+        err instanceof Error ? err.message : 'Gagal menyinkronkan status ke server.',
+        'system'
+      );
+      throw err;
+    }
   };
 
-  const handleDeleteProduct = (productId: string) => {
-    setProducts(prev => prev.filter(p => p.id !== productId));
-    deleteProductFromFirestore(productId);
+  const handleDeleteProduct = async (productId: string) => {
+    try {
+      await deleteProductFromFirestore(productId);
+      setProducts(prev => prev.filter(p => p.id !== productId));
+    } catch (err) {
+      triggerToast(
+        'Gagal Menghapus Produk',
+        err instanceof Error ? err.message : 'Gagal menghapus produk di server.',
+        'system'
+      );
+      throw err;
+    }
   };
 
-  // Review System (Persisted to Cloud Firestore & Local Cache)
-  const handleAddReview = (newReviewData: Omit<Review, 'id' | 'date' | 'helpfulCount'>) => {
+  // Review System (Verified Completed Purchase Only -> Persisted to Cloud Firestore First, Then Local Cache)
+  const handleAddReview = async (newReviewData: Omit<Review, 'id' | 'date' | 'helpfulCount'>) => {
+    const targetProduct = products.find((p) => p.id === newReviewData.productId);
+    const matchingCompletedOrder =
+      buyerOrders.find(
+        (o) =>
+          o.orderStatus === 'selesai' &&
+          (o.items || []).some((item) => item.productId === newReviewData.productId)
+      ) ||
+      (postOrderReviewTarget &&
+      postOrderReviewTarget.orderStatus === 'selesai' &&
+      (postOrderReviewTarget.items || []).some((item) => item.productId === newReviewData.productId)
+        ? postOrderReviewTarget
+        : undefined);
+
+    if (
+      !userProfile.isRegistered ||
+      !userProfile.id ||
+      (targetProduct && isProductOwnedByUser(targetProduct, userProfile)) ||
+      !matchingCompletedOrder
+    ) {
+      const denyMsg =
+        'Hanya pembeli yang telah berhasil menyelesaikan pembelian barang ini yang dapat mengirim ulasan.';
+      triggerToast('Ulasan Tidak Diizinkan', denyMsg, 'system', false);
+      throw new Error(denyMsg);
+    }
+
     const fullReview: Review = {
       ...newReviewData,
-      id: `rev-${Date.now()}`,
+      id: `rev-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       date: 'Hari ini',
       helpfulCount: 1,
+      verifiedPurchase: true,
+      buyerId: userProfile.id,
+      orderId: matchingCompletedOrder.id,
       createdAtIso: new Date().toISOString(),
     };
-    setReviews(prev => [fullReview, ...prev]);
-    void createReviewInFirestore(fullReview);
-    triggerToast('Ulasan Terpublikasi', 'Terima kasih atas ulasan terverifikasi Anda untuk brand lokal.', 'system');
+    try {
+      const savedReview = await createReviewInFirestore(fullReview);
+      setReviews((prev) =>
+        prev.some((r) => r.id === savedReview.id) ? prev : [savedReview, ...prev]
+      );
+      triggerToast('Ulasan Terpublikasi', 'Terima kasih atas ulasan terverifikasi Anda untuk brand lokal.', 'system');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Gagal mempublikasikan ulasan ke server.';
+      triggerToast('Ulasan Gagal Dikirim', msg, 'system', false);
+      throw err;
+    }
   };
 
   const AVAILABLE_CITIES = useMemo(() => {
@@ -2029,32 +2289,17 @@ export default function App() {
 
   const followersModalList = useMemo(() => {
     if (!followersModal) return [];
-    const targetCount = getStoreFollowerCount(
-      followersModal.brandName,
-      followingStores,
-      followerDeltas,
-      followersModalTargetIsOwn,
-      followersModal.sellerId
-    );
-    const isFollowed =
-      userProfile.isRegistered &&
-      isStoreFollowed(followingStores, followersModal.brandName, followersModal.sellerId);
     return getStoreFollowersList({
       brandName: followersModal.brandName,
       sellerId: followersModal.sellerId,
-      targetCount,
-      sellers: sellerDirectory,
-      users: getAllUsersFromDb(),
+      users: allUsersList,
       currentProfile: userProfile,
-      isFollowedByCurrentUser: isFollowed,
-      isOwnStore: followersModalTargetIsOwn,
+      followingStores: userProfile.isRegistered ? followingStores : [],
     });
   }, [
     followersModal,
-    followersModalTargetIsOwn,
     followingStores,
-    followerDeltas,
-    sellerDirectory,
+    allUsersList,
     userProfile,
   ]);
 
@@ -2065,9 +2310,10 @@ export default function App() {
       sellerId: followersModal.sellerId,
       ownFollowingStores: userProfile.isRegistered ? followingStores : [],
       sellers: sellerDirectory,
+      users: allUsersList,
       isOwnStore: followersModalTargetIsOwn,
     });
-  }, [followersModal, followersModalTargetIsOwn, followingStores, sellerDirectory, userProfile.isRegistered]);
+  }, [followersModal, followersModalTargetIsOwn, followingStores, sellerDirectory, allUsersList, userProfile.isRegistered]);
 
   const handleOpenFollowersModal = (
     brandName: string,
@@ -2323,19 +2569,20 @@ export default function App() {
                     userProfile.isRegistered &&
                     isStoreFollowed(followingStores, activeProfileBrandName, activeProfileSellerId)
                   }
-                  followerCount={getStoreFollowerCount(
-                    activeProfileBrandName,
-                    followingStores,
-                    followerDeltas,
-                    activeProfileIsOwn,
-                    activeProfileSellerId
-                  )}
+                  followerCount={getStoreFollowerCount({
+                    brandName: activeProfileBrandName,
+                    sellerId: activeProfileSellerId,
+                    users: allUsersList,
+                    currentProfile: userProfile,
+                    followingStores: userProfile.isRegistered ? followingStores : [],
+                  })}
                   followingCount={
                     getStoreFollowingList({
                       brandName: activeProfileBrandName,
                       sellerId: activeProfileSellerId,
                       ownFollowingStores: userProfile.isRegistered ? followingStores : [],
                       sellers: sellerDirectory,
+                      users: allUsersList,
                       isOwnStore: activeProfileIsOwn,
                     }).length
                   }
@@ -2359,12 +2606,9 @@ export default function App() {
                     window.scrollTo({ top: 0, behavior: 'smooth' });
                   }}
                   onAddReview={handleAddReview}
+                  purchasedProductIds={Array.from(purchasedProductIds)}
                   onRequireAuthForReview={() => {
-                    requireAuth(
-                      { type: 'store_review', storeTarget: selectedStoreTarget },
-                      'Masuk untuk Tulis Ulasan',
-                      'Silakan masuk akun terlebih dahulu untuk menulis ulasan & foto toko.'
-                    );
+                    requireAuth({ type: 'store_review', storeTarget: selectedStoreTarget });
                   }}
                   onReportStore={handleOpenReportModal}
                 />
@@ -2464,13 +2708,13 @@ export default function App() {
                         const isFollowed =
                           userProfile.isRegistered &&
                           isStoreFollowed(followingStores, seller.brandName, seller.sellerId);
-                        const count = getStoreFollowerCount(
-                          seller.brandName,
-                          followingStores,
-                          followerDeltas,
-                          seller.isCurrentUser,
-                          seller.sellerId
-                        );
+                        const count = getStoreFollowerCount({
+                          brandName: seller.brandName,
+                          sellerId: seller.sellerId,
+                          users: allUsersList,
+                          currentProfile: userProfile,
+                          followingStores: userProfile.isRegistered ? followingStores : [],
+                        });
                         return (
                           <div
                             key={seller.key}
@@ -2569,6 +2813,9 @@ export default function App() {
                               onClick={() => {
                                 setRecentlyViewedIds([]);
                                 setIsCatalogSearchFocused(false);
+                                if (userProfile.isRegistered && currentUserAccountRef.current) {
+                                  void persistBuyerSocialFields({ recentlyViewedIds: [] }).catch(() => {});
+                                }
                               }}
                               className="text-[11px] text-neutral-400 hover:text-neutral-700 underline underline-offset-2 cursor-pointer"
                             >
@@ -2700,13 +2947,13 @@ export default function App() {
                   pendingOrdersCount={pendingSellerOrdersCount}
                   brandName={userProfile.brandName || userProfile.name || 'Lapak Saya'}
                   brandCity={userProfile.brandCity || 'Indonesia'}
-                  followerCount={getStoreFollowerCount(
-                    userProfile.brandName || userProfile.name || 'Lapak Saya',
-                    followingStores,
-                    followerDeltas,
-                    true,
-                    userProfile.id
-                  )}
+                  followerCount={getStoreFollowerCount({
+                    brandName: userProfile.brandName || userProfile.name || 'Lapak Saya',
+                    sellerId: userProfile.id,
+                    users: allUsersList,
+                    currentProfile: userProfile,
+                    followingStores: userProfile.isRegistered ? followingStores : [],
+                  })}
                   followingCount={userProfile.isRegistered ? followingStores.length : 0}
                   onOpenProfile={handleOpenOwnProfile}
                   onOpenFollowers={(tab = 'followers') =>
@@ -2812,16 +3059,22 @@ export default function App() {
               onOpenChat={(brand, ctx) => handleOpenChatWithStore(brand, ctx)}
               isRegistered={userProfile.isRegistered}
               isOwnProduct={isProductOwnedByUser(activeSelectedProduct, userProfile)}
+              canWriteReview={Boolean(
+                userProfile.isRegistered &&
+                  !isProductOwnedByUser(activeSelectedProduct, userProfile) &&
+                  purchasedProductIds.has(activeSelectedProduct.id)
+              )}
+              hasPendingPurchase={Boolean(
+                userProfile.isRegistered &&
+                  !isProductOwnedByUser(activeSelectedProduct, userProfile) &&
+                  pendingPurchaseProductIds.has(activeSelectedProduct.id)
+              )}
               currentUserName={userProfile.name}
               currentUserCity={userProfile.buyerProfile?.city || userProfile.brandCity || 'Jakarta'}
               onRequireAuthForReview={() => {
                 const target = activeSelectedProduct;
                 handleCloseProductDetail();
-                requireAuth(
-                  { type: 'review', product: target },
-                  'Masuk untuk Tulis Ulasan',
-                  'Silakan masuk akun terlebih dahulu untuk menulis ulasan produk.'
-                );
+                requireAuth({ type: 'review', product: target });
               }}
               onFindSimilar={handleFindSimilar}
               isSellerFollowed={
@@ -2832,13 +3085,13 @@ export default function App() {
                   activeSelectedProduct.sellerId
                 )
               }
-              sellerFollowerCount={getStoreFollowerCount(
-                activeSelectedProduct.sellerBrandName || activeSelectedProduct.brand,
-                followingStores,
-                followerDeltas,
-                isProductOwnedByUser(activeSelectedProduct, userProfile),
-                activeSelectedProduct.sellerId
-              )}
+              sellerFollowerCount={getStoreFollowerCount({
+                brandName: activeSelectedProduct.sellerBrandName || activeSelectedProduct.brand,
+                sellerId: activeSelectedProduct.sellerId,
+                users: allUsersList,
+                currentProfile: userProfile,
+                followingStores: userProfile.isRegistered ? followingStores : [],
+              })}
               onToggleFollowSeller={handleToggleFollowStore}
               onOpenFollowers={(brand, sId) => handleOpenFollowersModal(brand, 'followers', sId)}
               onShareProduct={(prod) => {
@@ -2889,7 +3142,8 @@ export default function App() {
             sellers={sellerDirectory}
             initialQuery={catalogSearch}
             followingStores={userProfile.isRegistered ? followingStores : []}
-            followerDeltas={followerDeltas}
+            users={allUsersList}
+            currentProfile={userProfile}
             onToggleFollow={handleToggleFollowStore}
             onSelectStore={handleOpenStorefront}
           />
@@ -3015,7 +3269,7 @@ export default function App() {
             reviewerName={userProfile.name || 'Pembeli AROOS'}
             reviewerCity={userProfile.buyerProfile?.city || 'Indonesia'}
             onSubmitReview={async (rev) => {
-              handleAddReview(rev);
+              await handleAddReview(rev);
             }}
           />
         </Suspense>
@@ -3042,7 +3296,7 @@ export default function App() {
       )}
 
       {/* Clean & Minimalist Footer */}
-      <footer className="bg-white border-t border-neutral-200 mt-auto py-3.5 pb-24 md:py-5">
+      <footer className="bg-white border-t border-neutral-200 mt-auto py-2.5 pb-16 md:py-4 md:pb-5">
         <div className="w-full max-w-[1840px] mx-auto px-3.5 sm:px-6 lg:px-8 xl:px-10 flex items-center justify-between gap-3 text-xs text-neutral-500">
           <button
             type="button"

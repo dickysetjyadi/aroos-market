@@ -14,7 +14,13 @@ import {
   findUserInDatabase,
   isEmailRegistered,
   registerUserWithEmail,
+  saveUserToFirestore,
 } from '../services/phoneAuthService';
+import {
+  hashPassword,
+  isHashedPassword,
+  verifyPassword,
+} from '../utils/passwordHash';
 import { loginSuperadmin } from '../services/adminService';
 import { recordAuthTelemetryLog } from '../services/telemetryService';
 import { useConfirm } from './ConfirmDialogContext';
@@ -75,9 +81,6 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
-  const [city, setCity] = useState('Jakarta Selatan');
-  const [address, setAddress] = useState('');
-  const [postalCode, setPostalCode] = useState('');
   const [registerPassword, setRegisterPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showRegisterPassword, setShowRegisterPassword] = useState(false);
@@ -96,9 +99,6 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
       setName('');
       setEmail('');
       setPhone('');
-      setCity('Jakarta Selatan');
-      setAddress('');
-      setPostalCode('');
       setRegisterPassword('');
       setConfirmPassword('');
     } else {
@@ -156,10 +156,13 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
       const existingUser = await findUserInDatabase(trimmedInput, loginPassword);
 
       if (existingUser) {
-        if (existingUser.password && existingUser.password !== loginPassword) {
-          setLoginError('Kata sandi yang Anda masukkan salah.');
-          setIsCheckingLogin(false);
-          return;
+        if (existingUser.password) {
+          const passwordMatches = await verifyPassword(loginPassword, existingUser.password);
+          if (!passwordMatches) {
+            setLoginError('Kata sandi yang Anda masukkan salah.');
+            setIsCheckingLogin(false);
+            return;
+          }
         }
         if (existingUser.accountStatus === 'blocked') {
           setLoginError(
@@ -179,18 +182,24 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
           setIsCheckingLogin(false);
           return;
         }
-        setCurrentUserAccount(existingUser);
+        let loggedInAccount = existingUser;
+        if (!existingUser.password || !isHashedPassword(existingUser.password)) {
+          const hashed = await hashPassword(loginPassword);
+          loggedInAccount = { ...existingUser, password: hashed };
+          void saveUserToFirestore(loggedInAccount).catch(() => {});
+        }
+        setCurrentUserAccount(loggedInAccount);
         void recordAuthTelemetryLog({
-          userId: existingUser.id,
-          userName: existingUser.name,
-          userEmail: existingUser.email,
+          userId: loggedInAccount.id,
+          userName: loggedInAccount.name,
+          userEmail: loggedInAccount.email,
           action: 'login',
           fallbackCity:
-            existingUser.buyerProfile?.city ||
-            existingUser.sellerProfile?.brandCity ||
+            loggedInAccount.buyerProfile?.city ||
+            loggedInAccount.sellerProfile?.brandCity ||
             'Indonesia',
         });
-        startSuccessTransition(existingUser);
+        startSuccessTransition(loggedInAccount);
       } else {
         setLoginError(
           `Akun "${trimmedInput}" tidak ditemukan. Periksa kembali email/nama atau pilih Daftar Sekarang.`
@@ -212,8 +221,6 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
     const effectiveName = name.trim();
     const normalizedEmail = normalizeEmail(email);
     const effectivePhone = phone.trim();
-    const effectiveAddress = address.trim();
-    const effectivePostal = postalCode.trim();
 
     if (!effectiveName) {
       setRegisterError('Nama lengkap wajib diisi.');
@@ -232,21 +239,6 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
 
     if (!effectivePhone) {
       setRegisterError('Nomor HP / WhatsApp wajib diisi.');
-      return;
-    }
-
-    if (!city.trim()) {
-      setRegisterError('Kota / Kabupaten wajib dipilih.');
-      return;
-    }
-
-    if (!effectiveAddress) {
-      setRegisterError('Alamat lengkap wajib diisi.');
-      return;
-    }
-
-    if (!effectivePostal) {
-      setRegisterError('Kode pos wajib diisi.');
       return;
     }
 
@@ -281,26 +273,28 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
         return;
       }
 
-      const userId = `usr-${Date.now()}`;
+      const userId = `usr-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       const today = new Date().toISOString().split('T')[0];
+
+      const hashedPassword = await hashPassword(registerPassword);
 
       const accountDraft: UserAccount = {
         id: userId,
-        name: effectiveName,
-        email: normalizedEmail,
-        phone: effectivePhone,
-        password: registerPassword,
+        name: effectiveName.slice(0, 80),
+        email: normalizedEmail.slice(0, 120),
+        phone: effectivePhone.slice(0, 30),
+        password: hashedPassword,
         roles: ['buyer', 'seller'],
         activeRole: 'buyer',
         buyerProfile: {
-          city,
-          address: effectiveAddress,
-          postalCode: effectivePostal,
+          city: 'Jakarta Selatan',
+          address: '',
+          postalCode: '',
           totalOrdersCount: 0,
         },
         sellerProfile: {
           brandName: effectiveName,
-          brandCity: city,
+          brandCity: 'Jakarta Selatan',
           planId: 'starter',
           registeredAt: today,
           verifiedBrand: true,
@@ -315,14 +309,12 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
         userName: registeredAccount.name,
         userEmail: registeredAccount.email,
         action: 'register',
-        fallbackCity: city,
+        fallbackCity: 'Jakarta Selatan',
       });
 
       setName('');
       setEmail('');
       setPhone('');
-      setAddress('');
-      setPostalCode('');
       setRegisterPassword('');
       setConfirmPassword('');
 
@@ -452,7 +444,7 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
                 animate="animate"
                 exit="exit"
                 transition={AROOS_MODAL_TRANSITION}
-                className="relative w-full max-w-md bg-white/95 backdrop-blur-xl rounded-3xl shadow-2xl border border-neutral-200/80 p-4 sm:p-7 max-h-[92dvh] overflow-y-auto select-none"
+                className="relative w-full max-w-md bg-white rounded-3xl shadow-2xl border border-neutral-200/80 p-4 sm:p-7 max-h-[92dvh] overflow-y-auto select-none"
                 onClick={(e) => e.stopPropagation()}
               >
                 {/* Header Wordmark & Close Button */}
@@ -602,6 +594,7 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
                         <input
                           type="text"
                           required
+                          maxLength={80}
                           autoComplete="name"
                           placeholder="Contoh: Anindya Putri"
                           value={name}
@@ -618,6 +611,7 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
                         <input
                           type="email"
                           required
+                          maxLength={120}
                           autoComplete="email"
                           placeholder="Contoh: anindya@gmail.com"
                           value={email}
@@ -636,6 +630,7 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
                         <input
                           type="tel"
                           required
+                          maxLength={30}
                           autoComplete="tel"
                           placeholder="Contoh: 081298765432"
                           value={phone}
@@ -644,51 +639,7 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
                         />
                       </div>
 
-                      <div>
-                        <label className="font-semibold text-neutral-700 block mb-1">
-                          Kota / Kabupaten <span className="text-red-500">*</span>
-                        </label>
-                        <select
-                          value={city}
-                          onChange={(e) => setCity(e.target.value)}
-                          className="w-full px-3.5 py-2.5 bg-neutral-50 border border-neutral-200 rounded-2xl text-neutral-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-neutral-400/40 transition-all cursor-pointer font-medium"
-                        >
-                          {INDONESIAN_CITIES.map((c) => (
-                            <option key={c} value={c}>
-                              {c}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
 
-                      <div>
-                        <label className="font-semibold text-neutral-700 block mb-1">
-                          Alamat Lengkap <span className="text-red-500">*</span>
-                        </label>
-                        <textarea
-                          required
-                          rows={2}
-                          placeholder="Contoh: Jl. Senopati No. 42, RT 01/RW 03"
-                          value={address}
-                          onChange={(e) => setAddress(e.target.value)}
-                          className="w-full px-3.5 py-2.5 bg-neutral-50 border border-neutral-200 rounded-2xl text-neutral-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-neutral-400/40 transition-all font-medium resize-none"
-                        />
-                      </div>
-
-                      <div>
-                        <label className="font-semibold text-neutral-700 block mb-1">
-                          Kode Pos <span className="text-red-500">*</span>
-                        </label>
-                        <input
-                          type="text"
-                          required
-                          autoComplete="postal-code"
-                          placeholder="Contoh: 12110"
-                          value={postalCode}
-                          onChange={(e) => setPostalCode(e.target.value)}
-                          className="w-full px-3.5 py-2.5 bg-neutral-50 border border-neutral-200 rounded-2xl text-neutral-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-neutral-400/40 transition-all font-medium"
-                        />
-                      </div>
 
                       <div>
                         <label className="font-semibold text-neutral-700 block mb-1">

@@ -35,6 +35,29 @@ function stripUndefined<T extends Record<string, unknown>>(obj: T): Partial<T> {
   ) as Partial<T>;
 }
 
+function formatOrderFirestoreError(err: unknown, contextLabel = 'pesanan'): Error {
+  const raw = err instanceof Error ? err.message : String(err || '');
+  const lower = raw.toLowerCase();
+  if (lower.includes('sudah terjual atau stok habis')) {
+    return err instanceof Error ? err : new Error(raw);
+  }
+  if (
+    lower.includes('unavailable') ||
+    lower.includes('network') ||
+    lower.includes('offline') ||
+    lower.includes('failed to fetch')
+  ) {
+    return new Error(`Koneksi ke server terputus. Data ${contextLabel} belum tersimpan, silakan coba lagi.`);
+  }
+  if (lower.includes('permission-denied')) {
+    return new Error(`Perubahan ${contextLabel} ditolak aturan server. Periksa status atau kelengkapan data.`);
+  }
+  if (lower.includes('not-found') || lower.includes('no document to update')) {
+    return new Error(`Data ${contextLabel} tidak ditemukan di server.`);
+  }
+  return new Error(raw || `Gagal menyimpan ${contextLabel} ke server. Silakan coba lagi.`);
+}
+
 function sanitizeOrderForFirestore(order: Order): Record<string, unknown> {
   return stripUndefined({
     ...order,
@@ -303,18 +326,17 @@ export async function createOrderInFirestore(order: Order): Promise<void> {
   const payload = sanitizeOrderForFirestore(order);
   const nextOrder = payload as unknown as Order;
 
-  const local = getLocalSharedOrders();
-  saveLocalSharedOrders(mergeOrders([nextOrder], local));
-
   try {
     await setDoc(doc(db, 'orders', order.id), payload);
   } catch (error) {
     try {
       handleFirestoreError(error, OperationType.CREATE, `orders/${order.id}`);
-    } catch (wrappedErr) {
-      console.warn('Order saved locally; Firestore sync error:', wrappedErr);
-    }
+    } catch {}
+    throw formatOrderFirestoreError(error, 'pesanan');
   }
+
+  const local = getLocalSharedOrders();
+  saveLocalSharedOrders(mergeOrders([nextOrder], local));
 }
 
 export async function createOrderAndDecrementStockTransaction(
@@ -324,12 +346,10 @@ export async function createOrderAndDecrementStockTransaction(
 ): Promise<{ nextStock?: number; nextStatus?: 'available' | 'reserved' | 'sold' }> {
   const payload = sanitizeOrderForFirestore(order);
   const nextOrder = payload as unknown as Order;
-  saveLocalSharedOrders(mergeOrders([nextOrder], getLocalSharedOrders()));
-
   const safeQty = Math.max(1, Number(qty) || 1);
 
   try {
-    return await runTransaction(db, async (tx) => {
+    const result = await runTransaction(db, async (tx) => {
       const orderRef = doc(db, 'orders', order.id);
       let nextStock: number | undefined;
       let nextStatus: 'available' | 'reserved' | 'sold' | undefined;
@@ -361,14 +381,11 @@ export async function createOrderAndDecrementStockTransaction(
       tx.set(orderRef, payload);
       return { nextStock, nextStatus };
     });
+
+    saveLocalSharedOrders(mergeOrders([nextOrder], getLocalSharedOrders()));
+    return result;
   } catch (err: unknown) {
-    if (err instanceof Error && err.message.includes('sudah terjual atau stok habis')) {
-      throw err;
-    }
-    try {
-      await setDoc(doc(db, 'orders', order.id), payload);
-    } catch {}
-    return {};
+    throw formatOrderFirestoreError(err, 'transaksi pesanan');
   }
 }
 
@@ -377,19 +394,109 @@ export async function updateOrderInFirestore(
   updates: Partial<Order>
 ): Promise<void> {
   const payload = stripUndefined({ ...updates });
-  const local = getLocalSharedOrders().map((o) =>
-    o.id === orderId ? { ...o, ...payload } : o
-  );
-  saveLocalSharedOrders(local);
 
   try {
     await updateDoc(doc(db, 'orders', orderId), payload);
   } catch (error) {
     try {
       handleFirestoreError(error, OperationType.UPDATE, `orders/${orderId}`);
-    } catch (wrappedErr) {
-      console.warn('Order update saved locally; Firestore sync error:', wrappedErr);
-    }
+    } catch {}
+    throw formatOrderFirestoreError(error, 'status pesanan');
+  }
+
+  const local = getLocalSharedOrders().map((o) =>
+    o.id === orderId ? { ...o, ...payload } : o
+  );
+  saveLocalSharedOrders(local);
+}
+
+export async function cancelOrderAndRestoreStockTransaction(
+  orderId: string,
+  cancelledBy: 'buyer' | 'seller',
+  reason?: string
+): Promise<{
+  order: Order;
+  restoredProducts: { productId: string; nextStock: number; nextStatus: 'available' | 'reserved' | 'sold' }[];
+}> {
+  const nowIso = new Date().toISOString();
+  const safeReason = (reason || 'Dibatalkan sebelum pengiriman').trim().slice(0, 300);
+
+  try {
+    const result = await runTransaction(db, async (tx) => {
+      const orderRef = doc(db, 'orders', orderId);
+      const orderSnap = await tx.get(orderRef);
+      if (!orderSnap.exists()) {
+        throw new Error('Data pesanan tidak ditemukan di server.');
+      }
+
+      const orderData = { ...(orderSnap.data() as Order), id: orderSnap.id };
+      if (orderData.orderStatus === 'selesai' || orderData.orderStatus === 'dibatalkan') {
+        throw new Error('Pesanan yang sudah selesai atau dibatalkan tidak dapat diubah lagi.');
+      }
+      if (orderData.orderStatus === 'dikirim') {
+        throw new Error('Pesanan yang sudah dikirim tidak dapat dibatalkan.');
+      }
+
+      const itemQtyMap = new Map<string, number>();
+      for (const item of orderData.items || []) {
+        if (!item.productId || item.productId.startsWith('manual-')) continue;
+        itemQtyMap.set(
+          item.productId,
+          (itemQtyMap.get(item.productId) || 0) + Math.max(1, Number(item.quantity) || 1)
+        );
+      }
+
+      const restoredProducts: {
+        productId: string;
+        nextStock: number;
+        nextStatus: 'available' | 'reserved' | 'sold';
+      }[] = [];
+
+      const productSnaps = await Promise.all(
+        Array.from(itemQtyMap.entries()).map(async ([productId, qty]) => ({
+          productId,
+          qty,
+          ref: doc(db, 'products', productId),
+          snap: await tx.get(doc(db, 'products', productId)),
+        }))
+      );
+
+      for (const entry of productSnaps) {
+        if (!entry.snap.exists()) continue;
+        const prodData = entry.snap.data() as Product;
+        const currentStock = Math.max(0, Number(prodData.stock) || 0);
+        const nextStock = currentStock + entry.qty;
+        const nextStatus: 'available' | 'reserved' | 'sold' =
+          prodData.listingStatus === 'sold' ? 'available' : prodData.listingStatus || 'available';
+        tx.update(entry.ref, {
+          stock: nextStock,
+          listingStatus: nextStatus,
+          updatedAt: nowIso,
+        });
+        restoredProducts.push({ productId: entry.productId, nextStock, nextStatus });
+      }
+
+      const cancelUpdates = {
+        orderStatus: 'dibatalkan' as const,
+        cancelledBy,
+        cancelledReason: safeReason,
+        cancelledAt: nowIso,
+      };
+      tx.update(orderRef, cancelUpdates);
+
+      return {
+        order: { ...orderData, ...cancelUpdates },
+        restoredProducts,
+      };
+    });
+
+    const local = getLocalSharedOrders().map((o) =>
+      o.id === orderId ? result.order : o
+    );
+    saveLocalSharedOrders(local);
+    return result;
+  } catch (error) {
+    throw formatOrderFirestoreError(error, 'pembatalan pesanan');
   }
 }
 
@@ -410,9 +517,13 @@ export function subscribeToLiveOrders(
           });
         });
 
-        const merged = mergeOrders(firestoreList, getLocalSharedOrders());
-        saveLocalSharedOrders(merged);
-        onUpdate(merged);
+        const sorted = [...firestoreList].sort((a, b) => {
+          const ta = a.createdAtIso || a.id;
+          const tb = b.createdAtIso || b.id;
+          return tb.localeCompare(ta);
+        });
+        saveLocalSharedOrders(sorted);
+        onUpdate(sorted);
       },
       (error) => {
         try {
@@ -436,18 +547,17 @@ export async function createNotificationInFirestore(
   const payload = sanitizeNotificationForFirestore(notification);
   const nextNotif = payload as unknown as NotificationItem;
 
-  const local = getLocalSharedNotifications();
-  saveLocalSharedNotifications(mergeNotifications([nextNotif], local));
-
   try {
     await setDoc(doc(db, 'notifications', notification.id), payload);
   } catch (error) {
     try {
       handleFirestoreError(error, OperationType.CREATE, `notifications/${notification.id}`);
-    } catch (wrappedErr) {
-      console.warn('Notification saved locally; Firestore sync error:', wrappedErr);
-    }
+    } catch {}
+    throw formatOrderFirestoreError(error, 'notifikasi');
   }
+
+  const local = getLocalSharedNotifications();
+  saveLocalSharedNotifications(mergeNotifications([nextNotif], local));
 }
 
 export async function markNotificationReadInFirestore(
@@ -486,9 +596,13 @@ export function subscribeToLiveNotifications(
           });
         });
 
-        const merged = mergeNotifications(firestoreList, getLocalSharedNotifications());
-        saveLocalSharedNotifications(merged);
-        onUpdate(merged);
+        const sorted = [...firestoreList].sort((a, b) => {
+          const ta = a.createdAtIso || a.id;
+          const tb = b.createdAtIso || b.id;
+          return tb.localeCompare(ta);
+        });
+        saveLocalSharedNotifications(sorted);
+        onUpdate(sorted);
       },
       (error) => {
         try {

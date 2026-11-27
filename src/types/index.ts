@@ -69,6 +69,8 @@ export interface Product {
 export interface Review {
   id: string;
   productId: string;
+  buyerId?: string;
+  orderId?: string;
   author: string;
   city: string;
   rating: number;
@@ -175,7 +177,7 @@ export type PaymentMethod =
   | 'dana'
   | 'shopeepay';
 
-export type OrderStatus = 'menunggu_pembayaran' | 'diproses' | 'dikirim' | 'selesai';
+export type OrderStatus = 'menunggu_pembayaran' | 'diproses' | 'dikirim' | 'selesai' | 'dibatalkan';
 
 export interface OrderItem {
   productId: string;
@@ -210,6 +212,9 @@ export interface Order {
   paymentStatus: 'paid' | 'pending';
   orderStatus: OrderStatus;
   buyerConfirmedAt?: string;
+  cancelledBy?: 'buyer' | 'seller';
+  cancelledReason?: string;
+  cancelledAt?: string;
   negotiatedFromOffer?: boolean;
   trackingNumber: string;
   createdAt: string;
@@ -248,6 +253,9 @@ export interface BuyerProfile {
   postalCode?: string;
   savedAddresses?: string[];
   totalOrdersCount?: number;
+  wishlistIds?: string[];
+  followingStores?: string[];
+  recentlyViewedIds?: string[];
 }
 
 export interface SellerProfile {

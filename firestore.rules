@@ -20,6 +20,55 @@ service cloud.firestore {
       return request.resource.data;
     }
 
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidBuyerProfile(bp) {
+      return bp is map &&
+             bp.keys().hasOnly([
+               'address', 'city', 'postalCode', 'totalOrdersCount',
+               'savedAddresses', 'wishlistIds', 'followingStores', 'recentlyViewedIds'
+             ]) &&
+             (!('address' in bp) || (bp.address is string && bp.address.size() <= 400)) &&
+             (!('city' in bp) || (bp.city is string && bp.city.size() <= 80)) &&
+             (!('postalCode' in bp) || (bp.postalCode is string && bp.postalCode.size() <= 20)) &&
+             (!('totalOrdersCount' in bp) || (bp.totalOrdersCount is number && bp.totalOrdersCount >= 0)) &&
+             (!('savedAddresses' in bp) || (bp.savedAddresses is list && bp.savedAddresses.size() <= 10 && (bp.savedAddresses.size() == 0 || (bp.savedAddresses[0] is string && bp.savedAddresses[0].size() <= 400)))) &&
+             (!('wishlistIds' in bp) || (bp.wishlistIds is list && bp.wishlistIds.size() <= 100 && (bp.wishlistIds.size() == 0 || (bp.wishlistIds[0] is string && bp.wishlistIds[0].size() <= 128)))) &&
+             (!('followingStores' in bp) || (bp.followingStores is list && bp.followingStores.size() <= 150 && (bp.followingStores.size() == 0 || (bp.followingStores[0] is string && bp.followingStores[0].size() <= 128)))) &&
+             (!('recentlyViewedIds' in bp) || (bp.recentlyViewedIds is list && bp.recentlyViewedIds.size() <= 20 && (bp.recentlyViewedIds.size() == 0 || (bp.recentlyViewedIds[0] is string && bp.recentlyViewedIds[0].size() <= 128))));
+    }
+
+    function isValidSellerProfile(sp) {
+      return sp is map &&
+             sp.keys().hasAll(['brandName', 'brandCity']) &&
+             sp.keys().hasOnly([
+               'brandName', 'brandCity', 'brandDescription',
+               'planId', 'registeredAt', 'verifiedBrand'
+             ]) &&
+             sp.brandName is string && sp.brandName.size() > 0 && sp.brandName.size() <= 100 &&
+             sp.brandCity is string && sp.brandCity.size() > 0 && sp.brandCity.size() <= 80 &&
+             (!('brandDescription' in sp) || (sp.brandDescription is string && sp.brandDescription.size() <= 1000)) &&
+             (!('planId' in sp) || (sp.planId is string && sp.planId.size() <= 40)) &&
+             (!('registeredAt' in sp) || (sp.registeredAt is string && sp.registeredAt.size() <= 64)) &&
+             (!('verifiedBrand' in sp) || sp.verifiedBrand is bool);
+    }
+
+    function isValidMeasurements(m) {
+      return m is map &&
+             m.keys().hasOnly([
+               'panjangBaju', 'lebarDada', 'lebarBahu',
+               'panjangCelana', 'lebarPinggang', 'openLeg'
+             ]) &&
+             (!('panjangBaju' in m) || (m.panjangBaju is number && m.panjangBaju >= 0 && m.panjangBaju <= 500)) &&
+             (!('lebarDada' in m) || (m.lebarDada is number && m.lebarDada >= 0 && m.lebarDada <= 500)) &&
+             (!('lebarBahu' in m) || (m.lebarBahu is number && m.lebarBahu >= 0 && m.lebarBahu <= 500)) &&
+             (!('panjangCelana' in m) || (m.panjangCelana is number && m.panjangCelana >= 0 && m.panjangCelana <= 500)) &&
+             (!('lebarPinggang' in m) || (m.lebarPinggang is number && m.lebarPinggang >= 0 && m.lebarPinggang <= 500)) &&
+             (!('openLeg' in m) || (m.openLeg is number && m.openLeg >= 0 && m.openLeg <= 500));
+    }
+
     function isValidUser(data) {
       return data.keys().hasAll(['id', 'name', 'roles', 'activeRole']) &&
              data.keys().hasOnly([
@@ -35,10 +84,11 @@ service cloud.firestore {
              (!('email' in data) || (data.email is string && data.email.size() <= 120)) &&
              (!('city' in data) || (data.city is string && data.city.size() <= 80)) &&
              data.roles is list && data.roles.size() > 0 && data.roles.size() <= 5 &&
+             data.roles[0] is string && data.roles[0] in ['buyer', 'seller'] &&
              data.activeRole in ['buyer', 'seller'] &&
              (!('phoneVerified' in data) || data.phoneVerified is bool) &&
-             (!('buyerProfile' in data) || data.buyerProfile == null || data.buyerProfile is map) &&
-             (!('sellerProfile' in data) || data.sellerProfile == null || data.sellerProfile is map) &&
+             (!('buyerProfile' in data) || data.buyerProfile == null || isValidBuyerProfile(data.buyerProfile)) &&
+             (!('sellerProfile' in data) || data.sellerProfile == null || isValidSellerProfile(data.sellerProfile)) &&
              (!('accountStatus' in data) || data.accountStatus in ['active', 'blocked', 'banned']) &&
              (!('statusReason' in data) || (data.statusReason is string && data.statusReason.size() <= 300)) &&
              (!('statusUpdatedAt' in data) || (data.statusUpdatedAt is string && data.statusUpdatedAt.size() <= 64)) &&
@@ -79,17 +129,17 @@ service cloud.firestore {
              (!('subCategory' in data) || (data.subCategory is string && data.subCategory.size() <= 80)) &&
              (!('gender' in data) || data.gender in ['Pria', 'Wanita', 'Unisex']) &&
              (!('fit' in data) || (data.fit is string && data.fit.size() <= 80)) &&
-             (!('measurements' in data) || data.measurements is map) &&
+             (!('measurements' in data) || isValidMeasurements(data.measurements)) &&
              data.price is number && data.price >= 0 &&
              (!('originalPrice' in data) || (data.originalPrice is number && data.originalPrice >= 0)) &&
              data.stock is number && data.stock >= 0 &&
              (!('sku' in data) || (data.sku is string && data.sku.size() <= 80)) &&
              (!('barcode' in data) || (data.barcode is string && data.barcode.size() <= 80)) &&
-             (!('sizes' in data) || (data.sizes is list && data.sizes.size() <= 30)) &&
-             (!('colors' in data) || (data.colors is list && data.colors.size() <= 30)) &&
+             (!('sizes' in data) || (data.sizes is list && data.sizes.size() <= 30 && (data.sizes.size() == 0 || (data.sizes[0] is string && data.sizes[0].size() <= 40)))) &&
+             (!('colors' in data) || (data.colors is list && data.colors.size() <= 30 && (data.colors.size() == 0 || (data.colors[0] is string && data.colors[0].size() <= 50)))) &&
              (!('material' in data) || (data.material is string && data.material.size() <= 200)) &&
              (!('image' in data) || (data.image is string && data.image.size() <= 760000)) &&
-             (!('images' in data) || (data.images is list && data.images.size() <= 12)) &&
+             (!('images' in data) || (data.images is list && data.images.size() <= 12 && (data.images.size() == 0 || (data.images[0] is string && data.images[0].size() <= 760000)))) &&
              (!('condition' in data) || data.condition in ['Baru', 'Pre-loved']) &&
              (!('listingStatus' in data) || data.listingStatus in ['available', 'reserved', 'sold']) &&
              (!('reservedByUserId' in data) || (data.reservedByUserId is string && data.reservedByUserId.size() <= 128)) &&
@@ -110,6 +160,23 @@ service cloud.firestore {
              (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 64));
     }
 
+    function isValidPublicProfile(data) {
+      return data.keys().hasAll(['id', 'name']) &&
+             data.keys().hasOnly([
+               'id', 'name', 'avatarUrl', 'city', 'accountStatus',
+               'sellerProfile', 'followingStores', 'createdAt', 'updatedAt'
+             ]) &&
+             data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 80 &&
+             (!('avatarUrl' in data) || (data.avatarUrl is string && data.avatarUrl.size() <= 760000)) &&
+             (!('city' in data) || (data.city is string && data.city.size() <= 80)) &&
+             (!('accountStatus' in data) || data.accountStatus in ['active', 'blocked', 'banned']) &&
+             (!('sellerProfile' in data) || data.sellerProfile == null || isValidSellerProfile(data.sellerProfile)) &&
+             (!('followingStores' in data) || (data.followingStores is list && data.followingStores.size() <= 150 && (data.followingStores.size() == 0 || (data.followingStores[0] is string && data.followingStores[0].size() <= 128)))) &&
+             (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 64)) &&
+             (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 64));
+    }
+
     function isValidOrder(data) {
       return data.keys().hasAll([
                'id', 'orderNumber', 'customerName', 'customerPhone', 'customerCity',
@@ -121,7 +188,8 @@ service cloud.firestore {
                'sellerId', 'sellerBrandName', 'customerName', 'customerPhone',
                'customerCity', 'customerAddress', 'items', 'totalAmount', 'shippingFee',
                'courier', 'paymentMethod', 'paymentStatus', 'orderStatus', 'escrowStatus',
-               'buyerConfirmedAt', 'negotiatedFromOffer', 'trackingNumber', 'createdAt', 'createdAtIso'
+               'buyerConfirmedAt', 'cancelledBy', 'cancelledReason', 'cancelledAt',
+               'negotiatedFromOffer', 'trackingNumber', 'createdAt', 'createdAtIso'
              ]) &&
              data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
              data.orderNumber is string && data.orderNumber.size() > 0 && data.orderNumber.size() <= 64 &&
@@ -134,15 +202,18 @@ service cloud.firestore {
              data.customerPhone is string && data.customerPhone.size() > 0 && data.customerPhone.size() <= 30 &&
              data.customerCity is string && data.customerCity.size() > 0 && data.customerCity.size() <= 80 &&
              data.customerAddress is string && data.customerAddress.size() > 0 && data.customerAddress.size() <= 400 &&
-             data.items is list && data.items.size() > 0 && data.items.size() <= 50 &&
+             data.items is list && data.items.size() > 0 && data.items.size() <= 50 && data.items[0] is map &&
              data.totalAmount is number && data.totalAmount >= 0 &&
              data.shippingFee is number && data.shippingFee >= 0 &&
              data.courier is string && data.courier.size() > 0 && data.courier.size() <= 100 &&
              data.paymentMethod in ['chat_direct', 'cod', 'transfer_langsung', 'qris', 'bca_va', 'mandiri_va', 'bri_va', 'bni_va', 'gopay', 'ovo', 'dana', 'shopeepay'] &&
              data.paymentStatus in ['paid', 'pending'] &&
-             data.orderStatus in ['menunggu_pembayaran', 'diproses', 'dikirim', 'selesai'] &&
+             data.orderStatus in ['menunggu_pembayaran', 'diproses', 'dikirim', 'selesai', 'dibatalkan'] &&
              (!('escrowStatus' in data) || data.escrowStatus in ['held', 'released']) &&
              (!('buyerConfirmedAt' in data) || (data.buyerConfirmedAt is string && data.buyerConfirmedAt.size() <= 64)) &&
+             (!('cancelledBy' in data) || data.cancelledBy in ['buyer', 'seller']) &&
+             (!('cancelledReason' in data) || (data.cancelledReason is string && data.cancelledReason.size() <= 300)) &&
+             (!('cancelledAt' in data) || (data.cancelledAt is string && data.cancelledAt.size() <= 64)) &&
              (!('negotiatedFromOffer' in data) || data.negotiatedFromOffer is bool) &&
              data.trackingNumber is string && data.trackingNumber.size() <= 100 &&
              data.createdAt is string && data.createdAt.size() > 0 && data.createdAt.size() <= 64 &&
@@ -155,12 +226,14 @@ service cloud.firestore {
                'sizePurchased', 'fitFeedback', 'verifiedPurchase', 'date', 'helpfulCount'
              ]) &&
              data.keys().hasOnly([
-               'id', 'productId', 'author', 'city', 'rating', 'comment',
+               'id', 'productId', 'buyerId', 'orderId', 'author', 'city', 'rating', 'comment',
                'sizePurchased', 'fitFeedback', 'verifiedPurchase', 'date',
                'helpfulCount', 'images', 'userStats', 'createdAtIso'
              ]) &&
              data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
              data.productId is string && data.productId.size() > 0 && data.productId.size() <= 128 &&
+             (!('buyerId' in data) || (data.buyerId is string && data.buyerId.size() <= 128)) &&
+             (!('orderId' in data) || (data.orderId is string && data.orderId.size() <= 128)) &&
              data.author is string && data.author.size() > 0 && data.author.size() <= 100 &&
              data.city is string && data.city.size() > 0 && data.city.size() <= 80 &&
              data.rating is number && data.rating >= 1 && data.rating <= 5 &&
@@ -170,7 +243,7 @@ service cloud.firestore {
              data.verifiedPurchase is bool &&
              data.date is string && data.date.size() > 0 && data.date.size() <= 64 &&
              data.helpfulCount is number && data.helpfulCount >= 0 &&
-             (!('images' in data) || (data.images is list && data.images.size() <= 4)) &&
+             (!('images' in data) || (data.images is list && data.images.size() <= 4 && (data.images.size() == 0 || (data.images[0] is string && data.images[0].size() <= 760000)))) &&
              (!('userStats' in data) || (data.userStats is string && data.userStats.size() <= 100)) &&
              (!('createdAtIso' in data) || (data.createdAtIso is string && data.createdAtIso.size() <= 64));
     }
@@ -247,7 +320,7 @@ service cloud.firestore {
              (!('sellerUnreadCount' in data) || (data.sellerUnreadCount is number && data.sellerUnreadCount >= 0)) &&
              (!('isPinned' in data) || data.isPinned is bool) &&
              (!('pinnedAt' in data) || data.pinnedAt is number) &&
-             (!('hiddenBy' in data) || (data.hiddenBy is list && data.hiddenBy.size() <= 20)) &&
+             (!('hiddenBy' in data) || (data.hiddenBy is list && data.hiddenBy.size() <= 20 && (data.hiddenBy.size() == 0 || (data.hiddenBy[0] is string && data.hiddenBy[0].size() <= 128)))) &&
              (!('createdAtIso' in data) || (data.createdAtIso is string && data.createdAtIso.size() <= 64)) &&
              (!('updatedAtIso' in data) || (data.updatedAtIso is string && data.updatedAtIso.size() <= 64));
     }
@@ -344,7 +417,22 @@ service cloud.firestore {
       allow get: if isValidId(userId);
       allow list: if true;
       allow create: if isValidId(userId) && isValidUser(incoming()) && incoming().id == userId;
-      allow update: if isValidId(userId) && isValidUser(incoming()) && incoming().id == resource.data.id;
+      allow update: if isValidId(userId) &&
+                       isValidUser(incoming()) &&
+                       incoming().id == existing().id &&
+                       (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt);
+      allow delete: if isValidId(userId);
+    }
+
+    // Public Non-PII User Profiles (Storefront Directory & Follower Graph)
+    match /public_profiles/{userId} {
+      allow get: if isValidId(userId);
+      allow list: if true;
+      allow create: if isValidId(userId) && isValidPublicProfile(incoming()) && incoming().id == userId;
+      allow update: if isValidId(userId) &&
+                       isValidPublicProfile(incoming()) &&
+                       incoming().id == existing().id &&
+                       (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt);
       allow delete: if isValidId(userId);
     }
 
@@ -364,7 +452,10 @@ service cloud.firestore {
       allow get: if isValidId(productId);
       allow list: if true;
       allow create: if isValidId(productId) && isValidProduct(incoming()) && incoming().id == productId;
-      allow update: if isValidId(productId) && isValidProduct(incoming()) && incoming().id == resource.data.id;
+      allow update: if isValidId(productId) &&
+                       isValidProduct(incoming()) &&
+                       incoming().id == existing().id &&
+                       (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt);
       allow delete: if isValidId(productId);
     }
 
@@ -375,11 +466,19 @@ service cloud.firestore {
       allow create: if isValidId(orderId) && isValidOrder(incoming()) && incoming().id == orderId;
       allow update: if isValidId(orderId) &&
                        isValidOrder(incoming()) &&
-                       resource.data.orderStatus != 'selesai' &&
-                       incoming().diff(resource.data).affectedKeys().hasOnly(['orderStatus', 'trackingNumber', 'courier', 'escrowStatus', 'buyerConfirmedAt', 'paymentStatus']) &&
-                       incoming().id == resource.data.id &&
-                       incoming().orderNumber == resource.data.orderNumber &&
-                       incoming().totalAmount == resource.data.totalAmount;
+                       existing().orderStatus != 'selesai' &&
+                       existing().orderStatus != 'dibatalkan' &&
+                       (incoming().orderStatus != 'dibatalkan' || existing().orderStatus in ['menunggu_pembayaran', 'diproses']) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'orderStatus', 'trackingNumber', 'courier',
+                         'escrowStatus', 'buyerConfirmedAt', 'paymentStatus',
+                         'cancelledBy', 'cancelledReason', 'cancelledAt'
+                       ]) &&
+                       incoming().id == existing().id &&
+                       incoming().orderNumber == existing().orderNumber &&
+                       incoming().totalAmount == existing().totalAmount &&
+                       (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt) &&
+                       (!('createdAtIso' in existing()) || incoming().createdAtIso == existing().createdAtIso);
       allow delete: if false;
     }
 
@@ -390,7 +489,8 @@ service cloud.firestore {
       allow create: if isValidId(reviewId) && isValidReview(incoming()) && incoming().id == reviewId;
       allow update: if isValidId(reviewId) &&
                        isValidReview(incoming()) &&
-                       incoming().diff(resource.data).affectedKeys().hasOnly(['helpfulCount']);
+                       incoming().id == existing().id &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['helpfulCount']);
       allow delete: if isValidId(reviewId);
     }
 
@@ -401,7 +501,8 @@ service cloud.firestore {
       allow create: if isValidId(notificationId) && isValidNotification(incoming()) && incoming().id == notificationId;
       allow update: if isValidId(notificationId) &&
                        isValidNotification(incoming()) &&
-                       incoming().diff(resource.data).affectedKeys().hasOnly(['read']);
+                       incoming().id == existing().id &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['read']);
       allow delete: if false;
     }
 
@@ -412,14 +513,17 @@ service cloud.firestore {
       allow create: if isValidId(convId) && isValidChatConversation(incoming(), convId);
       allow update: if isValidId(convId) &&
                        isValidChatConversation(incoming(), convId) &&
-                       incoming().id == resource.data.id &&
-                       incoming().diff(resource.data).affectedKeys().hasOnly([
+                       incoming().id == existing().id &&
+                       incoming().storeId == existing().storeId &&
+                       (!('createdAtIso' in existing()) || incoming().createdAtIso == existing().createdAtIso) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
                          'offerStatus', 'offeredPrice', 'counterPrice', 'offerUpdatedBy',
                          'itemStatus', 'dealOrderId', 'lastMessage', 'lastTimestamp',
                          'unreadCount', 'buyerUnreadCount', 'sellerUnreadCount',
                          'isPinned', 'pinnedAt', 'hiddenBy', 'updatedAtIso',
                          'buyerPhone', 'buyerCity', 'buyerAddress',
-                         'buyerTypingAt', 'sellerTypingAt'
+                         'buyerTypingAt', 'sellerTypingAt',
+                         'storeName', 'storeAvatar'
                        ]);
       allow delete: if false;
 
@@ -430,8 +534,10 @@ service cloud.firestore {
         allow update: if isValidId(convId) &&
                          isValidId(messageId) &&
                          isValidChatMessage(incoming(), convId, messageId) &&
-                         incoming().id == resource.data.id &&
-                         incoming().diff(resource.data).affectedKeys().hasOnly(['offerStatus', 'isRead', 'counterAmount']);
+                         incoming().id == existing().id &&
+                         (!('conversationId' in existing()) || incoming().conversationId == existing().conversationId) &&
+                         (!('createdAtIso' in existing()) || incoming().createdAtIso == existing().createdAtIso) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['offerStatus', 'isRead', 'counterAmount']);
         allow delete: if false;
       }
     }
@@ -459,13 +565,15 @@ service cloud.firestore {
       allow create: if isValidId(reportId) && isValidUserReport(incoming(), reportId);
       allow update: if isValidId(reportId) &&
                        isValidUserReport(incoming(), reportId) &&
-                       incoming().diff(resource.data).affectedKeys().hasOnly(['status', 'adminNote', 'resolvedAt']);
+                       incoming().id == existing().id &&
+                       (!('createdAtIso' in existing()) || incoming().createdAtIso == existing().createdAtIso) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['status', 'adminNote', 'resolvedAt']);
       allow delete: if false;
     }
 
     // Connection testing doc
     match /test/connection {
-      allow read: if true;
+      allow get: if true;
     }
   }
 }

@@ -6,6 +6,8 @@ import {
   onSnapshot,
   query,
   orderBy,
+  where,
+  getDocs,
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../lib/firebase';
 import {
@@ -26,6 +28,26 @@ function stripUndefined<T extends Record<string, unknown>>(obj: T): Partial<T> {
   ) as Partial<T>;
 }
 
+function formatChatFirestoreError(err: unknown): Error {
+  const raw = err instanceof Error ? err.message : String(err || '');
+  const lower = raw.toLowerCase();
+  if (
+    lower.includes('unavailable') ||
+    lower.includes('network') ||
+    lower.includes('offline') ||
+    lower.includes('failed to fetch')
+  ) {
+    return new Error('Koneksi ke server chat terputus. Pesan belum tersinkron, coba lagi.');
+  }
+  if (lower.includes('permission-denied')) {
+    return new Error('Pesan atau data percakapan tidak memenuhi validasi server.');
+  }
+  if (lower.includes('exceeds the maximum') || lower.includes('too large')) {
+    return new Error('Ukuran lampiran foto chat terlalu besar untuk dikirim ke server.');
+  }
+  return new Error(raw || 'Gagal menyimpan percakapan ke server. Silakan coba lagi.');
+}
+
 export function sanitizeFirestoreId(raw: string): string {
   return raw.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 120);
 }
@@ -42,12 +64,12 @@ function sanitizeImageString(img?: string, maxLen = 700000): string | undefined 
   return undefined;
 }
 
-function sanitizeProductContext(p: ChatProductContext): Record<string, unknown> {
+function sanitizeProductContext(p: ChatProductContext, maxImgLen = 500000): Record<string, unknown> {
   return stripUndefined({
     id: String(p.id).slice(0, 128),
     name: String(p.name).slice(0, 200),
     price: Number(p.price) || 0,
-    image: sanitizeImageString(p.image, 750000) || '',
+    image: sanitizeImageString(p.image, maxImgLen) || '',
     brand: String(p.brand).slice(0, 100),
     sellerId: p.sellerId ? String(p.sellerId).slice(0, 128) : undefined,
     status: p.status,
@@ -60,7 +82,7 @@ function sanitizeConversationForFirestore(conv: ChatConversation): Record<string
     id: String(conv.id).slice(0, 128),
     storeId: String(conv.storeId || conv.storeName || 'store').slice(0, 128),
     storeName: String(conv.storeName || 'Penjual').slice(0, 100),
-    storeAvatar: sanitizeImageString(conv.storeAvatar, 250000),
+    storeAvatar: sanitizeImageString(conv.storeAvatar, 200000),
     buyerId: conv.buyerId ? String(conv.buyerId).slice(0, 128) : undefined,
     buyerName: conv.buyerName ? String(conv.buyerName).slice(0, 100) : undefined,
     buyerPhone: conv.buyerPhone ? String(conv.buyerPhone).slice(0, 30) : undefined,
@@ -72,7 +94,7 @@ function sanitizeConversationForFirestore(conv: ChatConversation): Record<string
       conv.buyerTypingAt !== undefined ? Math.max(0, Number(conv.buyerTypingAt) || 0) : undefined,
     sellerTypingAt:
       conv.sellerTypingAt !== undefined ? Math.max(0, Number(conv.sellerTypingAt) || 0) : undefined,
-    product: sanitizeProductContext(conv.product),
+    product: sanitizeProductContext(conv.product, 500000),
     lastMessage: String(conv.lastMessage || '').slice(0, 1000),
     lastTimestamp: String(conv.lastTimestamp || 'Baru saja').slice(0, 64),
     unreadCount: Number(conv.unreadCount) || 0,
@@ -87,6 +109,13 @@ function sanitizeConversationForFirestore(conv: ChatConversation): Record<string
 }
 
 function sanitizeMessageForFirestore(msg: ChatMessage): Record<string, unknown> {
+  if (msg.image && msg.image.length > 740000) {
+    throw new Error('Ukuran foto terlalu besar untuk dikirim. Silakan pilih atau ambil ulang foto.');
+  }
+  const safeMsgImage = sanitizeImageString(msg.image, 740000);
+  const maxContextImage = safeMsgImage
+    ? Math.max(0, 820000 - safeMsgImage.length)
+    : 500000;
   return stripUndefined({
     ...msg,
     id: String(msg.id).slice(0, 128),
@@ -97,9 +126,9 @@ function sanitizeMessageForFirestore(msg: ChatMessage): Record<string, unknown> 
     senderName: msg.senderName ? String(msg.senderName).slice(0, 100) : undefined,
     text: String(msg.text || '').slice(0, 2000),
     timestamp: String(msg.timestamp || '').slice(0, 64),
-    image: sanitizeImageString(msg.image, 750000),
+    image: safeMsgImage,
     productContext: msg.productContext
-      ? sanitizeProductContext(msg.productContext)
+      ? sanitizeProductContext(msg.productContext, maxContextImage)
       : undefined,
     createdAtIso: msg.createdAtIso || new Date().toISOString(),
   });
@@ -179,14 +208,6 @@ export async function saveConversationInFirestore(
   const payload = sanitizeConversationForFirestore(conv);
   const nextConv = payload as unknown as ChatConversation;
 
-  const existing = getLocalConversations();
-  const idx = existing.findIndex((c) => c.id === nextConv.id);
-  const updated =
-    idx > -1
-      ? existing.map((c, i) => (i === idx ? nextConv : c))
-      : [nextConv, ...existing];
-  saveLocalConversations(updated);
-
   try {
     await setDoc(doc(db, 'chat_conversations', nextConv.id), payload);
   } catch (error) {
@@ -196,10 +217,17 @@ export async function saveConversationInFirestore(
         OperationType.WRITE,
         `chat_conversations/${nextConv.id}`
       );
-    } catch (wrapped) {
-      console.warn('Conversation saved locally; Firestore sync error:', wrapped);
-    }
+    } catch {}
+    throw formatChatFirestoreError(error);
   }
+
+  const existing = getLocalConversations();
+  const idx = existing.findIndex((c) => c.id === nextConv.id);
+  const updated =
+    idx > -1
+      ? existing.map((c, i) => (i === idx ? nextConv : c))
+      : [nextConv, ...existing];
+  saveLocalConversations(updated);
 }
 
 export async function updateConversationInFirestore(
@@ -212,6 +240,38 @@ export async function updateConversationInFirestore(
     updatedAtIso: updates.updatedAtIso || new Date().toISOString(),
   });
 
+  try {
+    await updateDoc(doc(db, 'chat_conversations', convId), nextUpdates);
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+    if (fallbackConv && (msg.includes('not-found') || msg.includes('no document to update'))) {
+      try {
+        await setDoc(
+          doc(db, 'chat_conversations', convId),
+          sanitizeConversationForFirestore({ ...fallbackConv, ...nextUpdates } as ChatConversation)
+        );
+      } catch (fallbackErr) {
+        try {
+          handleFirestoreError(
+            fallbackErr,
+            OperationType.WRITE,
+            `chat_conversations/${convId}`
+          );
+        } catch {}
+        throw formatChatFirestoreError(fallbackErr);
+      }
+    } else {
+      try {
+        handleFirestoreError(
+          error,
+          OperationType.UPDATE,
+          `chat_conversations/${convId}`
+        );
+      } catch {}
+      throw formatChatFirestoreError(error);
+    }
+  }
+
   const existing = getLocalConversations();
   const hasExisting = existing.some((c) => c.id === convId);
   const updatedLocal = hasExisting
@@ -220,20 +280,6 @@ export async function updateConversationInFirestore(
       ? [{ ...fallbackConv, ...nextUpdates } as ChatConversation, ...existing]
       : existing;
   saveLocalConversations(updatedLocal);
-
-  try {
-    await updateDoc(doc(db, 'chat_conversations', convId), nextUpdates);
-  } catch (error) {
-    try {
-      handleFirestoreError(
-        error,
-        OperationType.UPDATE,
-        `chat_conversations/${convId}`
-      );
-    } catch (wrapped) {
-      console.warn('Conversation update saved locally; Firestore sync error:', wrapped);
-    }
-  }
 }
 
 export async function updateTypingStatusInFirestore(
@@ -271,15 +317,6 @@ export async function sendChatMessageInFirestore(
   const payload = sanitizeMessageForFirestore(withIso);
   const nextMsg = payload as unknown as ChatMessage;
 
-  const map = getLocalMessagesMap();
-  const currentList = map[convId] || [];
-  if (!currentList.some((m) => m.id === nextMsg.id)) {
-    saveLocalMessagesMap({
-      ...map,
-      [convId]: [...currentList, nextMsg],
-    });
-  }
-
   try {
     await setDoc(
       doc(db, 'chat_conversations', convId, 'messages', nextMsg.id),
@@ -292,9 +329,19 @@ export async function sendChatMessageInFirestore(
         OperationType.CREATE,
         `chat_conversations/${convId}/messages/${nextMsg.id}`
       );
-    } catch (wrapped) {
-      console.warn('Chat message saved locally; Firestore sync error:', wrapped);
+    } catch (wrappedErr) {
+      throw wrappedErr;
     }
+    throw new Error('Gagal mengirim pesan ke server.');
+  }
+
+  const map = getLocalMessagesMap();
+  const currentList = map[convId] || [];
+  if (!currentList.some((m) => m.id === nextMsg.id)) {
+    saveLocalMessagesMap({
+      ...map,
+      [convId]: [...currentList, nextMsg],
+    });
   }
 }
 
@@ -303,15 +350,6 @@ export async function updateChatMessageOfferStatusInFirestore(
   messageId: string,
   offerStatus: OfferStatus
 ): Promise<void> {
-  const map = getLocalMessagesMap();
-  const currentList = map[convId] || [];
-  saveLocalMessagesMap({
-    ...map,
-    [convId]: currentList.map((m) =>
-      m.id === messageId ? { ...m, offerStatus } : m
-    ),
-  });
-
   try {
     await updateDoc(
       doc(db, 'chat_conversations', convId, 'messages', messageId),
@@ -324,10 +362,18 @@ export async function updateChatMessageOfferStatusInFirestore(
         OperationType.UPDATE,
         `chat_conversations/${convId}/messages/${messageId}`
       );
-    } catch (wrapped) {
-      console.warn('Chat message status saved locally; Firestore sync error:', wrapped);
-    }
+    } catch {}
+    throw formatChatFirestoreError(error);
   }
+
+  const map = getLocalMessagesMap();
+  const currentList = map[convId] || [];
+  saveLocalMessagesMap({
+    ...map,
+    [convId]: currentList.map((m) =>
+      m.id === messageId ? { ...m, offerStatus } : m
+    ),
+  });
 }
 
 export async function markChatMessagesAsReadInFirestore(
@@ -485,4 +531,47 @@ export function subscribeToConversationMessages(
     mergeAndEmit([]);
     return () => {};
   }
+}
+
+export async function syncSellerProfileToConversationsInFirestore(
+  sellerId: string,
+  updates: { brandName: string; avatarUrl?: string }
+): Promise<void> {
+  if (!sellerId) return;
+  const safeBrand = updates.brandName.trim().slice(0, 100);
+  const safeAvatar =
+    updates.avatarUrl !== undefined && updates.avatarUrl.length <= 200000
+      ? updates.avatarUrl
+      : undefined;
+  const nowIso = new Date().toISOString();
+
+  try {
+    const q = query(collection(db, 'chat_conversations'), where('sellerId', '==', sellerId));
+    const snap = await getDocs(q);
+    await Promise.all(
+      snap.docs.map((d) =>
+        updateDoc(doc(db, 'chat_conversations', d.id), {
+          ...(safeBrand ? { storeName: safeBrand } : {}),
+          ...(safeAvatar !== undefined ? { storeAvatar: safeAvatar } : {}),
+          updatedAtIso: nowIso,
+        }).catch(() => {})
+      )
+    );
+  } catch (err) {
+    console.warn('Could not sync seller profile to chat_conversations:', err);
+  }
+
+  const local = getLocalConversations();
+  saveLocalConversations(
+    local.map((c) =>
+      c.sellerId === sellerId
+        ? {
+            ...c,
+            ...(safeBrand ? { storeName: safeBrand } : {}),
+            ...(safeAvatar !== undefined ? { storeAvatar: safeAvatar } : {}),
+            updatedAtIso: nowIso,
+          }
+        : c
+    )
+  );
 }

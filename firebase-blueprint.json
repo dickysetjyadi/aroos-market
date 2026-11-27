@@ -15,20 +15,30 @@
           "description": "Full legal or display name of user",
           "maxLength": 80
         },
+        "avatarUrl": {
+          "type": "string",
+          "description": "Profile avatar URL or compressed data URL",
+          "maxLength": 760000
+        },
         "phone": {
           "type": "string",
           "description": "Phone number used for OTP SMS verification",
-          "maxLength": 25
+          "maxLength": 30
+        },
+        "password": {
+          "type": "string",
+          "description": "Salted PBKDF2-SHA256 password hash",
+          "maxLength": 200
         },
         "email": {
           "type": "string",
           "description": "Email address of user",
-          "maxLength": 100
+          "maxLength": 120
         },
         "city": {
           "type": "string",
           "description": "City of residence or brand origin",
-          "maxLength": 50
+          "maxLength": 80
         },
         "roles": {
           "type": "array",
@@ -58,16 +68,26 @@
           "type": "boolean",
           "description": "Flag indicating whether phone number was validated via SMS OTP"
         },
+        "buyerProfile": {
+          "type": "object",
+          "description": "Buyer shipping details and cross-device social state (wishlistIds, followingStores, recentlyViewedIds)"
+        },
+        "sellerProfile": {
+          "type": "object",
+          "description": "Seller storefront metadata (brandName, brandCity, brandDescription, planId, registeredAt, verifiedBrand)"
+        },
         "createdAt": {
           "type": "string",
+          "maxLength": 64,
           "description": "Timestamp when account was created"
         },
         "updatedAt": {
           "type": "string",
+          "maxLength": 64,
           "description": "Timestamp when account was last updated"
         }
       },
-      "required": ["id", "name", "email", "roles", "activeRole"]
+      "required": ["id", "name", "roles", "activeRole"]
     },
     "EmailRegistry": {
       "title": "EmailRegistry",
@@ -108,6 +128,7 @@
         "subCategory": { "type": "string", "maxLength": 80 },
         "gender": { "type": "string", "enum": ["Pria", "Wanita", "Unisex"] },
         "fit": { "type": "string", "maxLength": 80 },
+        "measurements": { "type": "object" },
         "condition": { "type": "string", "enum": ["Baru", "Pre-loved"] },
         "listingStatus": { "type": "string", "enum": ["available", "reserved", "sold"] },
         "reservedByUserId": { "type": "string", "maxLength": 128 },
@@ -116,14 +137,23 @@
         "sizes": { "type": "array" },
         "colors": { "type": "array" },
         "price": { "type": "number" },
+        "originalPrice": { "type": "number" },
         "stock": { "type": "number" },
         "sku": { "type": "string", "maxLength": 80 },
         "barcode": { "type": "string", "maxLength": 80 },
         "image": { "type": "string", "maxLength": 760000 },
         "images": { "type": "array" },
+        "allowMeetup": { "type": "boolean" },
+        "meetupArea": { "type": "string", "maxLength": 120 },
         "description": { "type": "string", "maxLength": 4000 },
         "material": { "type": "string", "maxLength": 200 },
+        "rating": { "type": "number" },
+        "reviewsCount": { "type": "number" },
+        "verifiedBrand": { "type": "boolean" },
+        "isFeatured": { "type": "boolean" },
         "sellerId": { "type": "string", "maxLength": 128 },
+        "sellerBrandName": { "type": "string", "maxLength": 100 },
+        "sellerAvatar": { "type": "string", "maxLength": 300000 },
         "isActive": { "type": "boolean" },
         "createdAt": { "type": "string", "maxLength": 64 },
         "updatedAt": { "type": "string", "maxLength": 64 }
@@ -155,8 +185,12 @@
           "enum": ["chat_direct", "cod", "transfer_langsung", "qris", "bca_va", "mandiri_va", "bri_va", "bni_va", "gopay", "ovo", "dana", "shopeepay"]
         },
         "paymentStatus": { "type": "string", "enum": ["paid", "pending"] },
-        "orderStatus": { "type": "string", "enum": ["menunggu_pembayaran", "diproses", "dikirim", "selesai"] },
+        "orderStatus": { "type": "string", "enum": ["menunggu_pembayaran", "diproses", "dikirim", "selesai", "dibatalkan"] },
+        "escrowStatus": { "type": "string", "enum": ["held", "released"] },
         "buyerConfirmedAt": { "type": "string", "maxLength": 64 },
+        "cancelledBy": { "type": "string", "enum": ["buyer", "seller"] },
+        "cancelledReason": { "type": "string", "maxLength": 300 },
+        "cancelledAt": { "type": "string", "maxLength": 64 },
         "negotiatedFromOffer": { "type": "boolean" },
         "trackingNumber": { "type": "string", "maxLength": 100 },
         "createdAt": { "type": "string", "maxLength": 64 },
@@ -175,6 +209,8 @@
       "properties": {
         "id": { "type": "string", "maxLength": 128 },
         "productId": { "type": "string", "maxLength": 128 },
+        "buyerId": { "type": "string", "maxLength": 128 },
+        "orderId": { "type": "string", "maxLength": 128 },
         "author": { "type": "string", "maxLength": 100 },
         "city": { "type": "string", "maxLength": 80 },
         "rating": { "type": "number" },
@@ -188,7 +224,7 @@
         "userStats": { "type": "string", "maxLength": 100 },
         "createdAtIso": { "type": "string", "maxLength": 64 }
       },
-      "required": ["id", "productId", "author", "city", "rating", "comment", "fitFeedback", "verifiedPurchase", "date", "helpfulCount"]
+      "required": ["id", "productId", "author", "city", "rating", "comment", "sizePurchased", "fitFeedback", "verifiedPurchase", "date", "helpfulCount"]
     },
     "Notification": {
       "title": "Notification",
@@ -329,12 +365,33 @@
         "resolvedAt": { "type": "string", "maxLength": 64 }
       },
       "required": ["id", "reportedUserId", "reportedUserName", "reporterUserId", "reporterUserName", "source", "reason", "details", "status", "createdAtIso"]
+    },
+    "PublicProfile": {
+      "title": "PublicProfile",
+      "description": "Public non-PII storefront, avatar, city, and follow-list metadata exposed to shoppers without sensitive account credentials",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 80 },
+        "avatarUrl": { "type": "string", "maxLength": 760000 },
+        "city": { "type": "string", "maxLength": 80 },
+        "accountStatus": { "type": "string", "enum": ["active", "blocked", "banned"] },
+        "sellerProfile": { "type": "object" },
+        "followingStores": { "type": "array" },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "name"]
     }
   },
   "firestore": {
     "/users/{userId}": {
       "schema": "User",
       "description": "User profile documents stored by user ID"
+    },
+    "/public_profiles/{userId}": {
+      "schema": "PublicProfile",
+      "description": "Sanitized public storefront and follow-graph profiles with zero PII or password hashes"
     },
     "/products/{productId}": {
       "schema": "Product",

@@ -23,7 +23,7 @@ export const MobileNav: React.FC<MobileNavProps> = ({
   onOpenChat,
   unreadChatCount = 0,
 }) => {
-  const handleKatalogClick = () => {
+  const handleHomeClick = () => {
     if (activeMode !== 'shopper') {
       setActiveMode('shopper');
     }
@@ -50,10 +50,10 @@ export const MobileNav: React.FC<MobileNavProps> = ({
           border border-white/60 shadow-[0_8px_24px_rgba(0,0,0,0.08),0_2px_6px_rgba(0,0,0,0.04)]
           transition-all max-w-full"
       >
-        {/* Tab 1: Katalog */}
+        {/* Tab 1: Home */}
         <button
           type="button"
-          onClick={handleKatalogClick}
+          onClick={handleHomeClick}
           className={`relative z-10 flex items-center gap-1.5 px-3.5 py-2 min-h-[38px] rounded-full transition-colors duration-200 cursor-pointer whitespace-nowrap ${
             activeMode === 'shopper' && !isWishlistActive
               ? 'text-white font-semibold'
@@ -74,7 +74,7 @@ export const MobileNav: React.FC<MobileNavProps> = ({
           )}
           <Layers className="w-3.5 h-3.5 shrink-0 stroke-[2]" />
           <span className="text-[11px] tracking-tight leading-none">
-            Katalog
+            Home
           </span>
         </button>
 

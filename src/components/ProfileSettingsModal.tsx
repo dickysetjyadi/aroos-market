@@ -6,6 +6,8 @@ import {
 import { UserAccount, UserProfile } from '../types';
 import { setCurrentUserAccount, getCurrentUserAccount } from '../utils/userDb';
 import { saveUserToFirestore } from '../services/phoneAuthService';
+import { hashPassword } from '../utils/passwordHash';
+import { compressImageForUpload } from '../utils/imageCompression';
 import { useConfirm } from './ConfirmDialogContext';
 import {
   AROOS_BACKDROP_TRANSITION,
@@ -78,22 +80,28 @@ export const ProfileSettingsModal: React.FC<ProfileSettingsModalProps> = ({
     setSuccessMessage('');
   }, [isOpen, userProfile, currentUserAccount]);
 
-  const handleAvatarFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleAvatarFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
 
-    if (file.size > 2 * 1024 * 1024) {
-      setErrorMessage('Ukuran foto maksimal 2MB.');
+    if (file.size > 25 * 1024 * 1024) {
+      setErrorMessage('Ukuran foto maksimal 25MB.');
       return;
     }
 
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      setAvatarUrl(reader.result as string);
+    try {
+      const compressed = await compressImageForUpload(file, {
+        maxDimension: 420,
+        quality: 0.78,
+        maxDataUrlLength: 350_000,
+      });
+      setAvatarUrl(compressed);
       setAvatarError(false);
       setErrorMessage('');
-    };
-    reader.readAsDataURL(file);
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : 'Gagal memproses foto profil.');
+    }
   };
 
   const handleSave = async (e: React.FormEvent) => {
@@ -125,7 +133,7 @@ export const ProfileSettingsModal: React.FC<ProfileSettingsModalProps> = ({
         throw new Error('Akun pengguna tidak ditemukan.');
       }
 
-      const trimmedCity = city.trim() || currentAcc.sellerProfile?.brandCity || 'Jakarta';
+      const trimmedCity = (city.trim() || currentAcc.sellerProfile?.brandCity || 'Jakarta').slice(0, 80);
       const trimmedAddress = address.trim();
       const trimmedPostal = postalCode.trim();
       const existingSavedAddresses = currentAcc.buyerProfile?.savedAddresses || [];
@@ -134,12 +142,16 @@ export const ProfileSettingsModal: React.FC<ProfileSettingsModalProps> = ({
           ? [trimmedAddress, ...existingSavedAddresses].slice(0, 5)
           : existingSavedAddresses;
 
+      const nextPassword = newPassword
+        ? await hashPassword(newPassword)
+        : currentAcc.password;
+
       const updatedAccount: UserAccount = {
         ...currentAcc,
-        name: name.trim(),
-        phone: phone.trim() || currentAcc.phone || '',
+        name: name.trim().slice(0, 80),
+        phone: (phone.trim() || currentAcc.phone || '').slice(0, 30),
         avatarUrl: avatarUrl.trim(),
-        password: newPassword ? newPassword : currentAcc.password,
+        password: nextPassword?.slice(0, 200),
         roles: Array.from(new Set([...(currentAcc.roles || ['buyer']), 'seller'])),
         buyerProfile: {
           ...currentAcc.buyerProfile,
@@ -149,17 +161,17 @@ export const ProfileSettingsModal: React.FC<ProfileSettingsModalProps> = ({
           savedAddresses: nextSavedAddresses,
         },
         sellerProfile: {
-          brandName: brandName.trim() || name.trim(),
-          brandCity: trimmedCity || currentAcc.sellerProfile?.brandCity || 'Bandung',
+          brandName: (brandName.trim() || name.trim()).slice(0, 80),
+          brandCity: (trimmedCity || currentAcc.sellerProfile?.brandCity || 'Bandung').slice(0, 80),
           planId: currentAcc.sellerProfile?.planId || 'starter',
           registeredAt: currentAcc.sellerProfile?.registeredAt || new Date().toISOString().split('T')[0],
           verifiedBrand: true,
         },
       };
 
-      setCurrentUserAccount(updatedAccount);
-      await saveUserToFirestore(updatedAccount);
-      onProfileUpdated(updatedAccount);
+      const savedAccount = await saveUserToFirestore(updatedAccount);
+      setCurrentUserAccount(savedAccount);
+      onProfileUpdated(savedAccount);
 
       setSuccessMessage('Profil & alamat berhasil disimpan.');
       setNewPassword('');

@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import {
   Package, Truck, CheckCircle2, Clock, MapPin, Phone,
-  MessageSquare, FilePlus2, ListOrdered, AlertCircle
+  MessageSquare, FilePlus2, ListOrdered, AlertCircle, XCircle
 } from 'lucide-react';
 import {
   ChatConversation,
@@ -26,7 +26,8 @@ interface SellerOrdersPanelProps {
     newStatus: OrderStatus,
     trackingNumber?: string,
     courier?: string
-  ) => void;
+  ) => Promise<void> | void;
+  onCancelOrder?: (orderId: string, reason?: string) => Promise<void> | void;
   onCreateManualOrder?: (payload: {
     productId: string;
     productName: string;
@@ -89,12 +90,13 @@ export const SellerOrdersPanel: React.FC<SellerOrdersPanelProps> = ({
   products = [],
   conversations = [],
   onUpdateOrder,
+  onCancelOrder,
   onCreateManualOrder,
   triggerToast,
 }) => {
   const confirm = useConfirm();
   const [panelTab, setPanelTab] = useState<'list' | 'input'>('list');
-  const [filterStatus, setFilterStatus] = useState<'all' | 'diproses' | 'dikirim' | 'selesai'>('all');
+  const [filterStatus, setFilterStatus] = useState<'all' | 'diproses' | 'dikirim' | 'selesai' | 'dibatalkan'>('all');
   const [trackingInputs, setTrackingInputs] = useState<Record<string, string>>({});
 
   // Input Pesanan (Non-COD) states
@@ -119,8 +121,11 @@ export const SellerOrdersPanel: React.FC<SellerOrdersPanelProps> = ({
   const [manualResi, setManualResi] = useState<string>('');
   const [formError, setFormError] = useState<string>('');
   const [isSavingManual, setIsSavingManual] = useState<boolean>(false);
+  const [updatingOrderId, setUpdatingOrderId] = useState<string | null>(null);
 
-  const activeDealsCount = orders.filter((o) => o.orderStatus !== 'selesai').length;
+  const activeDealsCount = orders.filter(
+    (o) => o.orderStatus !== 'selesai' && o.orderStatus !== 'dibatalkan'
+  ).length;
   const needActionCount = orders.filter((o) => o.orderStatus === 'diproses').length;
   const completedDealsCount = orders.filter((o) => o.orderStatus === 'selesai').length;
 
@@ -179,7 +184,42 @@ export const SellerOrdersPanel: React.FC<SellerOrdersPanelProps> = ({
     });
     if (!ok) return;
 
-    onUpdateOrder(order.id, 'dikirim', resi);
+    setUpdatingOrderId(order.id);
+    try {
+      await onUpdateOrder(order.id, 'dikirim', resi);
+    } catch (err) {
+      triggerToast(
+        'Gagal Memperbarui Resi',
+        err instanceof Error ? err.message : 'Perubahan gagal disinkronkan ke server.',
+        'system'
+      );
+    } finally {
+      setUpdatingOrderId(null);
+    }
+  };
+
+  const handleCancelOrderClick = async (order: Order) => {
+    if (!onCancelOrder) return;
+    const ok = await confirm({
+      title: 'Batalkan Pesanan Pembeli',
+      message: `Batalkan deal #${order.orderNumber} dari ${order.customerName}? Stok produk akan dikembalikan otomatis.`,
+      confirmLabel: 'Ya, Batalkan',
+      tone: 'danger',
+    });
+    if (!ok) return;
+
+    setUpdatingOrderId(order.id);
+    try {
+      await onCancelOrder(order.id, 'Dibatalkan oleh penjual');
+    } catch (err) {
+      triggerToast(
+        'Gagal Membatalkan Pesanan',
+        err instanceof Error ? err.message : 'Perubahan gagal disinkronkan ke server.',
+        'system'
+      );
+    } finally {
+      setUpdatingOrderId(null);
+    }
   };
 
   const handleAssignExistingOrderResi = async (e: React.FormEvent) => {
@@ -207,11 +247,20 @@ export const SellerOrdersPanel: React.FC<SellerOrdersPanelProps> = ({
     });
     if (!ok) return;
 
-    onUpdateOrder(target.id, 'dikirim', existingResi.trim(), existingCourier.trim());
-    setSelectedExistingOrderId('');
-    setExistingCourier('');
-    setExistingResi('');
-    setPanelTab('list');
+    setUpdatingOrderId(target.id);
+    try {
+      await onUpdateOrder(target.id, 'dikirim', existingResi.trim(), existingCourier.trim());
+      setSelectedExistingOrderId('');
+      setExistingCourier('');
+      setExistingResi('');
+      setPanelTab('list');
+    } catch (err) {
+      setFormError(
+        err instanceof Error ? err.message : 'Gagal menyimpan resi ke server. Silakan coba lagi.'
+      );
+    } finally {
+      setUpdatingOrderId(null);
+    }
   };
 
   const handleCreateNewManualOrder = async (e: React.FormEvent) => {
@@ -380,6 +429,7 @@ export const SellerOrdersPanel: React.FC<SellerOrdersPanelProps> = ({
               { id: 'diproses', label: `Perlu Diproses (${orders.filter((o) => o.orderStatus === 'diproses').length})` },
               { id: 'dikirim', label: `Dikirim (${orders.filter((o) => o.orderStatus === 'dikirim').length})` },
               { id: 'selesai', label: `Selesai (${orders.filter((o) => o.orderStatus === 'selesai').length})` },
+              { id: 'dibatalkan', label: `Dibatalkan (${orders.filter((o) => o.orderStatus === 'dibatalkan').length})` },
             ].map((tab) => (
               <button
                 key={tab.id}
@@ -421,6 +471,7 @@ export const SellerOrdersPanel: React.FC<SellerOrdersPanelProps> = ({
             filteredOrders.map((order) => {
               const resiVal = trackingInputs[order.id] ?? order.trackingNumber;
               const isCompleted = order.orderStatus === 'selesai';
+              const isCancelled = order.orderStatus === 'dibatalkan';
 
               return (
                 <div
@@ -437,6 +488,8 @@ export const SellerOrdersPanel: React.FC<SellerOrdersPanelProps> = ({
                           className={`inline-flex items-center gap-1 text-[11px] font-semibold ${
                             order.orderStatus === 'selesai'
                               ? 'text-emerald-700'
+                              : order.orderStatus === 'dibatalkan'
+                              ? 'text-rose-700'
                               : order.orderStatus === 'dikirim'
                               ? 'text-sky-700'
                               : 'text-amber-700'
@@ -444,11 +497,16 @@ export const SellerOrdersPanel: React.FC<SellerOrdersPanelProps> = ({
                         >
                           <span aria-hidden="true">·</span>
                           {order.orderStatus === 'selesai' && <CheckCircle2 className="w-3 h-3" />}
+                          {order.orderStatus === 'dibatalkan' && <XCircle className="w-3 h-3" />}
                           {order.orderStatus === 'dikirim' && <Truck className="w-3 h-3" />}
-                          {order.orderStatus === 'diproses' && <Clock className="w-3 h-3" />}
+                          {(order.orderStatus === 'diproses' || order.orderStatus === 'menunggu_pembayaran') && (
+                            <Clock className="w-3 h-3" />
+                          )}
                           <span>
                             {order.orderStatus === 'selesai'
                               ? 'Selesai'
+                              : order.orderStatus === 'dibatalkan'
+                              ? 'Dibatalkan'
                               : order.orderStatus === 'dikirim'
                               ? 'Dalam Pengiriman'
                               : 'Perlu Diproses'}
@@ -464,8 +522,16 @@ export const SellerOrdersPanel: React.FC<SellerOrdersPanelProps> = ({
                       <p className="text-sm font-bold text-neutral-900 tabular-nums">
                         Rp {order.totalAmount.toLocaleString('id-ID')}
                       </p>
-                      <p className={`text-[10px] font-semibold ${isCompleted ? 'text-emerald-600' : 'text-neutral-500'}`}>
-                        {isCompleted ? 'Barang telah diterima' : 'Transaksi langsung AROOS'}
+                      <p
+                        className={`text-[10px] font-semibold ${
+                          isCompleted ? 'text-emerald-600' : isCancelled ? 'text-rose-600' : 'text-neutral-500'
+                        }`}
+                      >
+                        {isCompleted
+                          ? 'Barang telah diterima'
+                          : isCancelled
+                          ? 'Deal dibatalkan · Stok kembali'
+                          : 'Transaksi langsung AROOS'}
                       </p>
                     </div>
                   </div>
@@ -519,7 +585,7 @@ export const SellerOrdersPanel: React.FC<SellerOrdersPanelProps> = ({
 
                   {/* Fulfillment Control */}
                   <div className="pt-2 border-t border-neutral-100 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 sm:gap-3">
-                    {order.orderStatus === 'diproses' ? (
+                    {order.orderStatus === 'diproses' || order.orderStatus === 'menunggu_pembayaran' ? (
                       <>
                         <div className="flex-1 flex flex-col sm:flex-row sm:items-center gap-1.5 sm:gap-2 min-w-0">
                           <label className="text-[11px] font-semibold text-neutral-600 shrink-0">
@@ -535,15 +601,46 @@ export const SellerOrdersPanel: React.FC<SellerOrdersPanelProps> = ({
                             className="w-full sm:max-w-xs px-3 py-2 sm:py-1.5 bg-neutral-50 border border-neutral-200 rounded-xl text-xs font-mono text-neutral-900 focus:bg-white focus:outline-none focus:ring-1 focus:ring-neutral-900"
                           />
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => handleShipOrder(order)}
-                          className="w-full sm:w-auto px-4 py-2.5 sm:py-2 bg-neutral-900 hover:bg-black text-white text-xs font-semibold rounded-xl transition-all active:scale-95 cursor-pointer inline-flex items-center justify-center gap-1.5 shrink-0"
-                        >
-                          <Truck className="w-3.5 h-3.5" />
-                          <span>Input Resi &amp; Kirim Paket</span>
-                        </button>
+                        <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                          {onCancelOrder && (
+                            <button
+                              type="button"
+                              disabled={updatingOrderId === order.id}
+                              onClick={() => handleCancelOrderClick(order)}
+                              className="px-3.5 py-2.5 sm:py-2 bg-rose-50 hover:bg-rose-100 disabled:opacity-50 text-rose-700 text-xs font-semibold rounded-xl transition-colors cursor-pointer inline-flex items-center justify-center gap-1.5"
+                            >
+                              <XCircle className="w-3.5 h-3.5" />
+                              <span>Batalkan</span>
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            disabled={updatingOrderId === order.id}
+                            onClick={() => handleShipOrder(order)}
+                            className="flex-1 sm:flex-none px-4 py-2.5 sm:py-2 bg-neutral-900 hover:bg-black disabled:opacity-50 text-white text-xs font-semibold rounded-xl transition-all active:scale-95 cursor-pointer inline-flex items-center justify-center gap-1.5"
+                          >
+                            <Truck className="w-3.5 h-3.5" />
+                            <span>
+                              {updatingOrderId === order.id
+                                ? 'Menyimpan...'
+                                : 'Input Resi & Kirim Paket'}
+                            </span>
+                          </button>
+                        </div>
                       </>
+                    ) : order.orderStatus === 'dibatalkan' ? (
+                      <div className="flex flex-wrap items-center justify-between gap-2 w-full text-xs">
+                        <span className="text-rose-700 font-medium flex items-center gap-1.5">
+                          <XCircle className="w-3.5 h-3.5" />
+                          <span>
+                            {order.cancelledReason ||
+                              (order.cancelledBy === 'seller'
+                                ? 'Dibatalkan oleh penjual'
+                                : 'Dibatalkan oleh pembeli')}
+                          </span>
+                        </span>
+                        <span className="text-[11px] text-neutral-400">Stok produk telah dikembalikan</span>
+                      </div>
                     ) : order.orderStatus === 'dikirim' ? (
                       <div className="flex flex-wrap items-center justify-between gap-2 w-full text-xs">
                         <span className="text-neutral-600">
@@ -701,10 +798,11 @@ export const SellerOrdersPanel: React.FC<SellerOrdersPanelProps> = ({
                   <div className="pt-2 flex justify-end">
                     <button
                       type="submit"
-                      className="inline-flex items-center gap-1.5 px-5 py-2.5 bg-neutral-900 hover:bg-black text-white text-xs font-semibold rounded-xl cursor-pointer transition-all active:scale-95"
+                      disabled={Boolean(updatingOrderId)}
+                      className="inline-flex items-center gap-1.5 px-5 py-2.5 bg-neutral-900 hover:bg-black disabled:opacity-50 text-white text-xs font-semibold rounded-xl cursor-pointer transition-all active:scale-95"
                     >
                       <Truck className="w-3.5 h-3.5" />
-                      <span>Simpan Resi &amp; Tandai Dikirim</span>
+                      <span>{updatingOrderId ? 'Menyimpan...' : 'Simpan Resi & Tandai Dikirim'}</span>
                     </button>
                   </div>
                 </form>

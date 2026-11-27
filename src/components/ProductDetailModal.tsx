@@ -11,6 +11,8 @@ import { ReportTarget } from './ReportModal';
 import { getCategorySpec } from '../data/categorySpecs';
 import { buildProductShareUrl, copyTextToClipboard } from '../utils/marketplaceSocial';
 import { useConfirm } from './ConfirmDialogContext';
+import { compressImageForUpload } from '../utils/imageCompression';
+import { PRODUCT_ASSETS } from '../assets/productAssets';
 import {
   AROOS_BACKDROP_TRANSITION,
   AROOS_MODAL_TRANSITION,
@@ -21,11 +23,16 @@ interface ProductDetailModalProps {
   product: Product | null;
   onClose: () => void;
   reviews: Review[];
-  onAddReview: (review: Omit<Review, 'id' | 'date' | 'helpfulCount'>) => void;
+  onAddReview: (review: Omit<Review, 'id' | 'date' | 'helpfulCount'>) => Promise<void> | void;
   onOpenStore?: (brandName: string, sellerId?: string) => void;
   onOpenChat?: (brandName: string, productContext?: ChatProductContext) => void;
   isRegistered?: boolean;
   isOwnProduct?: boolean;
+  canWriteReview?: boolean;
+  alreadyReviewed?: boolean;
+  hasPendingPurchase?: boolean;
+  helpfulVotedIds?: string[];
+  onToggleHelpfulReview?: (reviewId: string) => void;
   currentUserName?: string;
   currentUserCity?: string;
   onRequireAuthForReview?: () => void;
@@ -47,6 +54,11 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({
   onOpenChat,
   isRegistered = false,
   isOwnProduct = false,
+  canWriteReview = false,
+  alreadyReviewed = false,
+  hasPendingPurchase = false,
+  helpfulVotedIds = [],
+  onToggleHelpfulReview,
   currentUserName = '',
   currentUserCity = 'Jakarta',
   onRequireAuthForReview,
@@ -86,6 +98,8 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({
   const [newFitFeedback, setNewFitFeedback] = useState<'Pas' | 'Agak Kecil' | 'Agak Longgar'>('Pas');
   const [attachedPhotos, setAttachedPhotos] = useState<string[]>([]);
   const [photoError, setPhotoError] = useState<string | null>(null);
+  const [isSubmittingReview, setIsSubmittingReview] = useState<boolean>(false);
+  const [reviewSubmitError, setReviewSubmitError] = useState<string | null>(null);
   
   // Review filter & Lightbox states
   const [reviewFilter, setReviewFilter] = useState<'all' | 'with_photo' | '5_star' | '4_star'>('all');
@@ -115,6 +129,12 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({
       setSelectedColor(product.colors[0] || 'Default');
     }
   }, [product?.id]);
+
+  useEffect(() => {
+    if (!canWriteReview || isOwnProduct) {
+      setShowReviewForm(false);
+    }
+  }, [canWriteReview, isOwnProduct]);
 
   useEffect(() => {
     if (!product || activeLightbox || galleryImages.length <= 1) return;
@@ -190,31 +210,36 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({
 
 
   // Handle Photo Attachment by User
-  const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
+    e.target.value = '';
     if (!files || files.length === 0) return;
 
-    if (attachedPhotos.length + files.length > 4) {
+    const remainingSlots = Math.max(0, 4 - attachedPhotos.length);
+    if (remainingSlots <= 0 || files.length > remainingSlots) {
       setPhotoError('Maksimal 4 foto per ulasan.');
-      return;
+      if (remainingSlots <= 0) return;
     }
 
     setPhotoError(null);
-    Array.from(files).forEach(file => {
-      if (file.size > 5 * 1024 * 1024) {
-        setPhotoError('Ukuran setiap foto maksimal 5MB.');
-        return;
+    for (const file of Array.from(files).slice(0, remainingSlots)) {
+      if (file.size > 25 * 1024 * 1024) {
+        setPhotoError('Ukuran setiap foto maksimal 25MB.');
+        continue;
       }
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const result = event.target?.result as string;
-        if (result) {
-          setAttachedPhotos(prev => [...prev, result].slice(0, 4));
-        }
-      };
-      reader.readAsDataURL(file);
-    });
-    e.target.value = '';
+      try {
+        const compressed = await compressImageForUpload(file, {
+          maxDimension: 760,
+          quality: 0.72,
+          maxDataUrlLength: 200_000,
+        });
+        setAttachedPhotos((prev) => [...prev, compressed].slice(0, 4));
+      } catch (err) {
+        setPhotoError(
+          err instanceof Error ? err.message : 'Gagal memproses foto ulasan.'
+        );
+      }
+    }
   };
 
   const handleRemovePhoto = async (index: number) => {
@@ -233,8 +258,8 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({
   const handleAddPresetPhoto = () => {
     const presets = [
       product.image,
-      '/src/assets/images/hero_local_fashion_1792948051901.jpg',
-      '/src/assets/images/product_denim_jacket_1792948053731.jpg'
+      PRODUCT_ASSETS.heroLocalFashion,
+      PRODUCT_ASSETS.productDenimJacket,
     ];
     const nextPhoto = presets[attachedPhotos.length % presets.length];
     if (attachedPhotos.length < 4) {
@@ -244,7 +269,9 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({
 
   const handleSubmitReview = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newAuthor.trim() || !newComment.trim()) return;
+    if (!canWriteReview || isOwnProduct) return;
+    if (!newAuthor.trim() || !newComment.trim() || isSubmittingReview) return;
+    setReviewSubmitError(null);
 
     const ok = await confirm({
       title: 'Kirim Ulasan',
@@ -253,24 +280,33 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({
     });
     if (!ok) return;
 
-    onAddReview({
-      productId: product.id,
-      author: newAuthor.trim(),
-      city: newCity,
-      rating: newRating,
-      comment: newComment.trim(),
-      sizePurchased: selectedSize,
-      fitFeedback: newFitFeedback,
-      verifiedPurchase: true,
-      images: attachedPhotos.length > 0 ? attachedPhotos : undefined,
-      userStats: newUserStats.trim() || undefined,
-    });
+    setIsSubmittingReview(true);
+    try {
+      await onAddReview({
+        productId: product.id,
+        author: newAuthor.trim(),
+        city: newCity,
+        rating: newRating,
+        comment: newComment.trim(),
+        sizePurchased: selectedSize,
+        fitFeedback: newFitFeedback,
+        verifiedPurchase: true,
+        images: attachedPhotos.length > 0 ? attachedPhotos : undefined,
+        userStats: newUserStats.trim() || undefined,
+      });
 
-    setNewAuthor('');
-    setNewComment('');
-    setNewUserStats('');
-    setAttachedPhotos([]);
-    setShowReviewForm(false);
+      setNewAuthor('');
+      setNewComment('');
+      setNewUserStats('');
+      setAttachedPhotos([]);
+      setShowReviewForm(false);
+    } catch (err) {
+      setReviewSubmitError(
+        err instanceof Error ? err.message : 'Gagal menyimpan ulasan ke server. Silakan coba lagi.'
+      );
+    } finally {
+      setIsSubmittingReview(false);
+    }
   };
 
 
@@ -986,7 +1022,7 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({
                 <span className="text-xs font-medium text-neutral-500 self-start sm:self-auto">
                   Anda pemilik listing ini
                 </span>
-              ) : (
+              ) : canWriteReview ? (
                 <button
                   type="button"
                   onClick={() => {
@@ -1003,7 +1039,16 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({
                   <Plus className="w-4 h-4" />
                   <span>{showReviewForm ? 'Tutup Form' : 'Tulis Ulasan & Foto'}</span>
                 </button>
-              )}
+              ) : alreadyReviewed ? (
+                <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-emerald-50 border border-emerald-200/70 text-xs font-semibold text-emerald-700 self-start sm:self-auto">
+                  <Check className="w-3.5 h-3.5" />
+                  <span>Ulasan Anda sudah terkirim</span>
+                </span>
+              ) : hasPendingPurchase ? (
+                <span className="text-xs font-medium text-neutral-500 self-start sm:self-auto">
+                  Selesaikan pesanan Anda di Pesanan Saya untuk menulis ulasan
+                </span>
+              ) : null}
             </div>
 
             {/* Sizing Accuracy Trust Metric (Only shown when real buyer reviews exist) */}
@@ -1118,7 +1163,7 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({
             </div>
 
             {/* Interactive Write Review Form with Photo Attachment */}
-            {showReviewForm && !isOwnProduct && (
+            {showReviewForm && canWriteReview && !isOwnProduct && (
               <form onSubmit={handleSubmitReview} className="p-5 sm:p-6 bg-neutral-50 rounded-2xl border border-neutral-200 space-y-4 animate-in fade-in duration-150">
                 <div className="flex items-center justify-between">
                   <h4 className="text-xs font-bold uppercase tracking-wider text-neutral-800 flex items-center gap-2">
@@ -1278,19 +1323,27 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({
                   )}
                 </div>
 
+                  {reviewSubmitError && (
+                    <p className="text-[11px] text-rose-600 font-medium bg-rose-50 border border-rose-200 rounded-xl px-3 py-2">
+                      {reviewSubmitError}
+                    </p>
+                  )}
+
                 <div className="flex justify-end gap-2 pt-2">
                   <button
                     type="button"
+                    disabled={isSubmittingReview}
                     onClick={() => setShowReviewForm(false)}
-                    className="px-4 py-2 text-xs font-medium text-neutral-600 hover:text-neutral-900 cursor-pointer"
+                    className="px-4 py-2 text-xs font-medium text-neutral-600 hover:text-neutral-900 cursor-pointer disabled:opacity-50"
                   >
                     Batal
                   </button>
                   <button
                     type="submit"
-                    className="px-5 py-2 bg-neutral-900 hover:bg-black text-white text-xs font-semibold rounded-xl shadow-xs transition-all active:scale-95 cursor-pointer"
+                    disabled={isSubmittingReview}
+                    className="px-5 py-2 bg-neutral-900 hover:bg-black disabled:opacity-50 text-white text-xs font-semibold rounded-xl shadow-xs transition-all active:scale-95 cursor-pointer"
                   >
-                    Publikasikan Ulasan
+                    {isSubmittingReview ? 'Mengirim...' : 'Publikasikan Ulasan'}
                   </button>
                 </div>
               </form>
@@ -1376,11 +1429,24 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({
                       </div>
                     )}
 
-                    <div className="flex items-center gap-1 text-[11px] text-neutral-400 pt-1">
-                      <button className="flex items-center gap-1 hover:text-neutral-600 transition-colors cursor-pointer">
-                        <ThumbsUp className="w-3 h-3" />
-                        <span>Membantu ({review.helpfulCount})</span>
-                      </button>
+                    <div className="flex items-center gap-1 pt-1">
+                      {(() => {
+                        const isHelpfulVoted = helpfulVotedIds.includes(review.id);
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => onToggleHelpfulReview?.(review.id)}
+                            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium transition-colors cursor-pointer ${
+                              isHelpfulVoted
+                                ? 'bg-neutral-900 text-white'
+                                : 'text-neutral-500 hover:text-neutral-900 hover:bg-neutral-100'
+                            }`}
+                          >
+                            <ThumbsUp className={`w-3 h-3 ${isHelpfulVoted ? 'fill-white' : ''}`} />
+                            <span>Membantu ({review.helpfulCount})</span>
+                          </button>
+                        );
+                      })()}
                     </div>
                   </div>
                 ))

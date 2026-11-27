@@ -14,6 +14,7 @@ import {
 import { isProductOwnedByUser } from '../../utils/ownership';
 import { useConfirm } from '../ConfirmDialogContext';
 import { ReservedBuyerModal } from '../ReservedBuyerModal';
+import { compressImageForUpload } from '../../utils/imageCompression';
 import {
   AROOS_BACKDROP_TRANSITION,
   AROOS_MODAL_TRANSITION,
@@ -32,10 +33,10 @@ interface InventoryManagerProps {
   sellerAvatar?: string;
   pendingEditProductId?: string | null;
   onClearPendingEdit?: () => void;
-  onUpdateProduct?: (productId: string, updates: Partial<Product>) => void;
-  onAddProduct: (newProduct: Product) => void;
-  onToggleActive?: (productId: string, newActiveState: boolean) => void;
-  onDeleteProduct?: (productId: string) => void;
+  onUpdateProduct?: (productId: string, updates: Partial<Product>) => Promise<void> | void;
+  onAddProduct: (newProduct: Product) => Promise<void> | void;
+  onToggleActive?: (productId: string, newActiveState: boolean) => Promise<void> | void;
+  onDeleteProduct?: (productId: string) => Promise<void> | void;
   triggerToast: (title: string, message: string, type: 'order' | 'low_stock' | 'social_sync' | 'system') => void;
 }
 
@@ -87,6 +88,10 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
   const [description, setDescription] = useState('');
   const [uploadedImages, setUploadedImages] = useState<string[]>([]);
   const [photoFormError, setPhotoFormError] = useState<string | null>(null);
+  const [isProcessingPhoto, setIsProcessingPhoto] = useState(false);
+  const [isProcessingEditPhoto, setIsProcessingEditPhoto] = useState(false);
+  const [isSubmittingListing, setIsSubmittingListing] = useState(false);
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [publishImmediately, setPublishImmediately] = useState(true);
   // Optional Garment Measurements (cm)
   const [panjangBaju, setPanjangBaju] = useState('');
@@ -325,37 +330,58 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
     setCustomColorInput('');
   };
 
-  const compressImageFile = (file: File, maxDimension = 900, quality = 0.78): Promise<string> => {
+  const recompressDataUrl = (
+    rawDataUrl: string,
+    maxDimension = 760,
+    quality = 0.72
+  ): Promise<string> => {
     return new Promise((resolve) => {
-      const reader = new FileReader();
-      reader.onload = (ev) => {
-        const rawDataUrl = ev.target?.result as string;
-        if (!rawDataUrl) {
-          resolve('');
+      if (!rawDataUrl || !rawDataUrl.startsWith('data:image/')) {
+        resolve(rawDataUrl);
+        return;
+      }
+      const img = new Image();
+      img.onload = () => {
+        const ratio = Math.min(1, maxDimension / Math.max(img.width, img.height));
+        const targetWidth = Math.max(1, Math.round(img.width * ratio));
+        const targetHeight = Math.max(1, Math.round(img.height * ratio));
+        const canvas = document.createElement('canvas');
+        canvas.width = targetWidth;
+        canvas.height = targetHeight;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(rawDataUrl);
           return;
         }
-        const img = new Image();
-        img.onload = () => {
-          const ratio = Math.min(1, maxDimension / Math.max(img.width, img.height));
-          const targetWidth = Math.max(1, Math.round(img.width * ratio));
-          const targetHeight = Math.max(1, Math.round(img.height * ratio));
-          const canvas = document.createElement('canvas');
-          canvas.width = targetWidth;
-          canvas.height = targetHeight;
-          const ctx = canvas.getContext('2d');
-          if (!ctx) {
-            resolve(rawDataUrl);
-            return;
-          }
-          ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
-          resolve(canvas.toDataURL('image/jpeg', quality));
-        };
-        img.onerror = () => resolve(rawDataUrl);
-        img.src = rawDataUrl;
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, targetWidth, targetHeight);
+        ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+        resolve(canvas.toDataURL('image/jpeg', quality));
       };
-      reader.onerror = () => resolve('');
-      reader.readAsDataURL(file);
+      img.onerror = () => resolve(rawDataUrl);
+      img.src = rawDataUrl;
     });
+  };
+
+  const fitImagesToFirestoreBudget = async (images: string[]): Promise<string[]> => {
+    const estimateTotal = (arr: string[]) =>
+      arr.reduce((sum, img) => sum + img.length, 0) + (arr[0]?.length || 0);
+
+    let current = [...images];
+    const passes: Array<[number, number]> = [
+      [760, 0.72],
+      [640, 0.62],
+      [520, 0.52],
+    ];
+    for (const [dim, q] of passes) {
+      if (estimateTotal(current) <= 700_000) break;
+      current = await Promise.all(
+        current.map((img) =>
+          img.startsWith('data:image/') ? recompressDataUrl(img, dim, q) : Promise.resolve(img)
+        )
+      );
+    }
+    return current;
   };
 
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -365,14 +391,36 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
     const remainingSlots = Math.max(0, 5 - uploadedImages.length);
     const selectedFiles = Array.from(files).slice(0, remainingSlots);
     e.target.value = '';
+    if (remainingSlots <= 0) {
+      setPhotoFormError('Maksimal 5 foto per produk.');
+      return;
+    }
 
-    for (const file of selectedFiles) {
-      if (file.size > 10 * 1024 * 1024) continue;
-      const compressed = await compressImageFile(file);
-      if (compressed) {
-        setUploadedImages((prev) => [...prev, compressed].slice(0, 5));
-        setPhotoFormError(null);
+    setPhotoFormError(null);
+    setIsProcessingPhoto(true);
+    try {
+      for (const file of selectedFiles) {
+        if (file.size > 25 * 1024 * 1024) {
+          setPhotoFormError('Ukuran setiap foto maksimal 25MB.');
+          continue;
+        }
+        try {
+          const compressed = await compressImageForUpload(file, {
+            maxDimension: 760,
+            quality: 0.72,
+            maxDataUrlLength: 280_000,
+          });
+          setUploadedImages((prev) => [...prev, compressed].slice(0, 5));
+        } catch (err) {
+          setPhotoFormError(
+            err instanceof Error
+              ? err.message
+              : 'Foto gagal diproses. Coba ambil ulang atau pilih foto lain.'
+          );
+        }
       }
+    } finally {
+      setIsProcessingPhoto(false);
     }
   };
 
@@ -396,14 +444,36 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
     const remainingSlots = Math.max(0, 5 - editImages.length);
     const selectedFiles = Array.from(files).slice(0, remainingSlots);
     e.target.value = '';
+    if (remainingSlots <= 0) {
+      setEditPhotoError('Maksimal 5 foto per produk.');
+      return;
+    }
 
-    for (const file of selectedFiles) {
-      if (file.size > 10 * 1024 * 1024) continue;
-      const compressed = await compressImageFile(file);
-      if (compressed) {
-        setEditImages((prev) => [...prev, compressed].slice(0, 5));
-        setEditPhotoError(null);
+    setEditPhotoError(null);
+    setIsProcessingEditPhoto(true);
+    try {
+      for (const file of selectedFiles) {
+        if (file.size > 25 * 1024 * 1024) {
+          setEditPhotoError('Ukuran setiap foto maksimal 25MB.');
+          continue;
+        }
+        try {
+          const compressed = await compressImageForUpload(file, {
+            maxDimension: 760,
+            quality: 0.72,
+            maxDataUrlLength: 280_000,
+          });
+          setEditImages((prev) => [...prev, compressed].slice(0, 5));
+        } catch (err) {
+          setEditPhotoError(
+            err instanceof Error
+              ? err.message
+              : 'Foto gagal diproses. Coba ambil ulang atau pilih foto lain.'
+          );
+        }
       }
+    } finally {
+      setIsProcessingEditPhoto(false);
     }
   };
 
@@ -460,91 +530,107 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
     });
     if (!ok) return;
 
-    const primaryImage = uploadedImages[0];
-    const allImages = [...uploadedImages];
-    const randomSuffix = Math.floor(1000 + Math.random() * 9000);
+    if (isSubmittingListing) return;
+    setIsSubmittingListing(true);
 
-    const builtMeasurements = buildMeasurementsPayload(activeMeasurementType, {
-      panjangBaju,
-      lebarDada,
-      lebarBahu,
-      panjangCelana,
-      lebarPinggang,
-      openLeg,
-    });
+    try {
+      const fittedImages = await fitImagesToFirestoreBudget(uploadedImages);
+      const primaryImage = fittedImages[0];
+      const allImages = [...fittedImages];
+      const randomSuffix = Math.floor(1000 + Math.random() * 9000);
 
-    const effectiveBrand = sellerBrandName || ownerProfile?.brandName || ownerProfile?.name || 'Lapak Saya';
-    const effectiveSellerId = sellerId || ownerProfile?.id;
+      const builtMeasurements = buildMeasurementsPayload(activeMeasurementType, {
+        panjangBaju,
+        lebarDada,
+        lebarBahu,
+        panjangCelana,
+        lebarPinggang,
+        openLeg,
+      });
 
-    const newListing: Product = {
-      id: `prod-${Date.now().toString().slice(-6)}`,
-      name: cleanTitle,
-      brand: effectiveBrand,
-      sellerBrandName: effectiveBrand,
-      brandCity: cleanCity,
-      category,
-      subCategory: subCategory || activeSpec.subCategories[0],
-      ...(activeSpec.supportsGender ? { gender } : {}),
-      ...(activeSpec.supportsFit && (fit || activeSpec.fitOptions[0])
-        ? { fit: fit || activeSpec.fitOptions[0] }
-        : {}),
-      ...(builtMeasurements ? { measurements: builtMeasurements } : {}),
-      condition,
-      listingStatus: 'available',
-      allowMeetup,
-      ...(allowMeetup ? { meetupArea: meetupArea.trim() || `COD ${cleanCity}` } : {}),
-      price: numericPrice,
-      stock: finalStock,
-      sku: `ARS-${randomSuffix}`,
-      barcode: `8991204${randomSuffix}`,
-      sizes: finalSizes,
-      colors: finalColors,
-      image: primaryImage,
-      images: allImages,
-      description:
-        description.trim() ||
-        `${cleanTitle} (${subCategory}, ${condition}${
-          finalSizes.length > 0 ? `, size ${finalSizes.join(', ')}` : ''
-        }) berlokasi di ${cleanCity}. Chat penjual untuk detail atau nego harga.`,
-      rating: 5.0,
-      reviewsCount: 0,
-      verifiedBrand: true,
-      ...(effectiveSellerId ? { sellerId: effectiveSellerId } : {}),
-      ...(sellerAvatar ? { sellerAvatar } : {}),
-      isActive: publishImmediately,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
+      const effectiveBrand = sellerBrandName || ownerProfile?.brandName || ownerProfile?.name || 'Lapak Saya';
+      const effectiveSellerId = sellerId || ownerProfile?.id;
 
-    onAddProduct(newListing);
-    setTitle('');
-    setPrice('250000');
-    setStock(condition === 'Pre-loved' ? 1 : 2);
-    setDescription('');
-    setMeetupArea('');
-    setUploadedImages([]);
-    setPhotoFormError(null);
-    setPanjangBaju('');
-    setLebarDada('');
-    setLebarBahu('');
-    setPanjangCelana('');
-    setLebarPinggang('');
-    setOpenLeg('');
-    setSizes(activeSpec.supportsSize && activeSpec.defaultSize ? [activeSpec.defaultSize] : []);
+      const newListing: Product = {
+        id: `prod-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        name: cleanTitle,
+        brand: effectiveBrand,
+        sellerBrandName: effectiveBrand,
+        brandCity: cleanCity,
+        category,
+        subCategory: subCategory || activeSpec.subCategories[0],
+        ...(activeSpec.supportsGender ? { gender } : {}),
+        ...(activeSpec.supportsFit && (fit || activeSpec.fitOptions[0])
+          ? { fit: fit || activeSpec.fitOptions[0] }
+          : {}),
+        ...(builtMeasurements ? { measurements: builtMeasurements } : {}),
+        condition,
+        listingStatus: 'available',
+        allowMeetup,
+        ...(allowMeetup ? { meetupArea: meetupArea.trim() || `COD ${cleanCity}` } : {}),
+        price: numericPrice,
+        stock: finalStock,
+        sku: `ARS-${randomSuffix}`,
+        barcode: `8991204${randomSuffix}`,
+        sizes: finalSizes,
+        colors: finalColors,
+        image: primaryImage,
+        images: allImages,
+        description:
+          description.trim() ||
+          `${cleanTitle} (${subCategory}, ${condition}${
+            finalSizes.length > 0 ? `, size ${finalSizes.join(', ')}` : ''
+          }) berlokasi di ${cleanCity}. Chat penjual untuk detail atau nego harga.`,
+        rating: 5.0,
+        reviewsCount: 0,
+        verifiedBrand: true,
+        ...(effectiveSellerId ? { sellerId: effectiveSellerId } : {}),
+        ...(sellerAvatar ? { sellerAvatar } : {}),
+        isActive: publishImmediately,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
 
-    triggerToast(
-      publishImmediately ? 'Barang Berhasil Ditayangkan' : 'Disimpan ke Draft',
-      publishImmediately
-        ? `"${newListing.name}" sudah tampil di katalog AROOS.`
-        : `"${newListing.name}" tersimpan sebagai draft.`,
-      'system'
-    );
+      await onAddProduct(newListing);
 
-    if (!publishImmediately) {
-      setListingTab('draft');
-      setSearch('');
-      onSwitchSection?.('listings');
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      setTitle('');
+      setPrice('250000');
+      setStock(condition === 'Pre-loved' ? 1 : 2);
+      setDescription('');
+      setMeetupArea('');
+      setUploadedImages([]);
+      setPhotoFormError(null);
+      setPanjangBaju('');
+      setLebarDada('');
+      setLebarBahu('');
+      setPanjangCelana('');
+      setLebarPinggang('');
+      setOpenLeg('');
+      setSizes(activeSpec.supportsSize && activeSpec.defaultSize ? [activeSpec.defaultSize] : []);
+
+      triggerToast(
+        publishImmediately ? 'Barang Berhasil Ditayangkan' : 'Disimpan ke Draft',
+        publishImmediately
+          ? `"${newListing.name}" sudah tampil di katalog AROOS.`
+          : `"${newListing.name}" tersimpan sebagai draft.`,
+        'system'
+      );
+
+      if (!publishImmediately) {
+        setListingTab('draft');
+        setSearch('');
+        onSwitchSection?.('listings');
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+    } catch (err) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : 'Gagal menyimpan produk ke server. Silakan coba lagi.';
+      setPhotoFormError(msg);
+      triggerToast('Gagal Menayangkan Barang', msg, 'system');
+    } finally {
+      setIsSubmittingListing(false);
     }
   };
 
@@ -643,43 +729,56 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
     });
     if (!ok) return;
 
-    const editedMeasurements = buildMeasurementsPayload(editMeasurementType, {
-      panjangBaju: editPanjangBaju,
-      lebarDada: editLebarDada,
-      lebarBahu: editLebarBahu,
-      panjangCelana: editPanjangCelana,
-      lebarPinggang: editLebarPinggang,
-      openLeg: editOpenLeg,
-    });
+    if (isSavingEdit) return;
+    setIsSavingEdit(true);
 
-    onUpdateProduct(editingProduct.id, {
-      name: nextName,
-      category: editCategory,
-      subCategory: editSubCategory || editSpec.subCategories[0],
-      gender: editSpec.supportsGender ? editGender : undefined,
-      fit: editSpec.supportsFit ? editFit || editSpec.fitOptions[0] : undefined,
-      measurements: editedMeasurements || {},
-      sizes: nextSizes,
-      colors:
-        editColors.length > 0
-          ? editColors
-          : editSpec.colorSuggestions[0]
-            ? [editSpec.colorSuggestions[0]]
-            : [],
-      image: editImages[0],
-      images: editImages,
-      price: nextPrice,
-      condition: editCondition,
-      listingStatus: editListingStatus,
-      reservedByUserId: editListingStatus === 'reserved' ? editReservedByUserId : '',
-      reservedByUserName: editListingStatus === 'reserved' ? editReservedByUserName : '',
-      stock: nextStock,
-      description: editDescription.trim() || editingProduct.description,
-      updatedAt: new Date().toISOString(),
-    });
+    try {
+      const fittedEditImages = await fitImagesToFirestoreBudget(editImages);
+      const editedMeasurements = buildMeasurementsPayload(editMeasurementType, {
+        panjangBaju: editPanjangBaju,
+        lebarDada: editLebarDada,
+        lebarBahu: editLebarBahu,
+        panjangCelana: editPanjangCelana,
+        lebarPinggang: editLebarPinggang,
+        openLeg: editOpenLeg,
+      });
 
-    triggerToast('Listing Diperbarui', `Perubahan pada "${nextName}" telah disimpan.`, 'system');
-    setEditingProduct(null);
+      await onUpdateProduct(editingProduct.id, {
+        name: nextName,
+        category: editCategory,
+        subCategory: editSubCategory || editSpec.subCategories[0],
+        gender: editSpec.supportsGender ? editGender : undefined,
+        fit: editSpec.supportsFit ? editFit || editSpec.fitOptions[0] : undefined,
+        measurements: editedMeasurements || {},
+        sizes: nextSizes,
+        colors:
+          editColors.length > 0
+            ? editColors
+            : editSpec.colorSuggestions[0]
+              ? [editSpec.colorSuggestions[0]]
+              : [],
+        image: fittedEditImages[0],
+        images: fittedEditImages,
+        price: nextPrice,
+        condition: editCondition,
+        listingStatus: editListingStatus,
+        reservedByUserId: editListingStatus === 'reserved' ? editReservedByUserId : '',
+        reservedByUserName: editListingStatus === 'reserved' ? editReservedByUserName : '',
+        stock: nextStock,
+        description: editDescription.trim() || editingProduct.description,
+        updatedAt: new Date().toISOString(),
+      });
+
+      triggerToast('Listing Diperbarui', `Perubahan pada "${nextName}" telah disimpan.`, 'system');
+      setEditingProduct(null);
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : 'Gagal menyimpan perubahan ke server.';
+      setEditPhotoError(msg);
+      triggerToast('Gagal Menyimpan Perubahan', msg, 'system');
+    } finally {
+      setIsSavingEdit(false);
+    }
   };
 
   const handleChangeListingStatus = async (product: Product, nextStatus: 'available' | 'reserved' | 'sold') => {
@@ -704,13 +803,21 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
     });
     if (!ok) return;
 
-    onUpdateProduct(product.id, {
-      listingStatus: nextStatus,
-      reservedByUserId: '',
-      reservedByUserName: '',
-      stock: nextStatus === 'sold' ? 0 : Math.max(1, product.stock || 1),
-    });
-    triggerToast('Status Diperbarui', `"${product.name}" kini berstatus ${labelMap[nextStatus]}.`, 'system');
+    try {
+      await onUpdateProduct(product.id, {
+        listingStatus: nextStatus,
+        reservedByUserId: '',
+        reservedByUserName: '',
+        stock: nextStatus === 'sold' ? 0 : Math.max(1, product.stock || 1),
+      });
+      triggerToast('Status Diperbarui', `"${product.name}" kini berstatus ${labelMap[nextStatus]}.`, 'system');
+    } catch (err) {
+      triggerToast(
+        'Gagal Mengubah Status',
+        err instanceof Error ? err.message : 'Perubahan gagal disinkronkan ke server.',
+        'system'
+      );
+    }
   };
 
   const handleToggleVisibility = async (product: Product, isVisible: boolean) => {
@@ -723,7 +830,15 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
     });
     if (!ok) return;
 
-    onToggleActive(product.id, nextVisible);
+    try {
+      await onToggleActive(product.id, nextVisible);
+    } catch (err) {
+      triggerToast(
+        'Gagal Mengubah Visibilitas',
+        err instanceof Error ? err.message : 'Perubahan gagal disinkronkan ke server.',
+        'system'
+      );
+    }
   };
 
   const handleDeleteListing = async (product: Product) => {
@@ -736,8 +851,16 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
     });
     if (!ok) return;
 
-    onDeleteProduct(product.id);
-    triggerToast('Listing Dihapus', `"${product.name}" telah dihapus.`, 'system');
+    try {
+      await onDeleteProduct(product.id);
+      triggerToast('Listing Dihapus', `"${product.name}" telah dihapus.`, 'system');
+    } catch (err) {
+      triggerToast(
+        'Gagal Menghapus Listing',
+        err instanceof Error ? err.message : 'Gagal menghapus listing di server.',
+        'system'
+      );
+    }
   };
 
   const effectiveOwnerProfile = useMemo<UserProfile>(
@@ -868,19 +991,23 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
                   {uploadedImages.length < 5 && (
                     <button
                       type="button"
+                      disabled={isProcessingPhoto}
                       onClick={() => fileInputRef.current?.click()}
-                      className="aspect-square rounded-2xl border-2 border-dashed border-neutral-300 hover:border-neutral-900 bg-neutral-50 hover:bg-white flex flex-col items-center justify-center gap-1 text-neutral-500 hover:text-neutral-900 transition-colors cursor-pointer"
+                      className="aspect-square rounded-2xl border-2 border-dashed border-neutral-300 hover:border-neutral-900 bg-neutral-50 hover:bg-white flex flex-col items-center justify-center gap-1 text-neutral-500 hover:text-neutral-900 transition-colors cursor-pointer disabled:opacity-50"
                     >
                       <Plus className="w-5 h-5" />
-                      <span className="text-[11px] font-medium">Tambah</span>
+                      <span className="text-[11px] font-medium">
+                        {isProcessingPhoto ? 'Memproses...' : 'Tambah'}
+                      </span>
                     </button>
                   )}
                 </div>
               ) : (
                 <button
                   type="button"
+                  disabled={isProcessingPhoto}
                   onClick={() => fileInputRef.current?.click()}
-                  className={`w-full aspect-16/10 rounded-2xl border-2 border-dashed bg-neutral-50/70 hover:bg-neutral-50 flex flex-col items-center justify-center gap-2 transition-colors cursor-pointer p-4 ${
+                  className={`w-full aspect-16/10 rounded-2xl border-2 border-dashed bg-neutral-50/70 hover:bg-neutral-50 flex flex-col items-center justify-center gap-2 transition-colors cursor-pointer p-4 disabled:opacity-60 ${
                     photoFormError
                       ? 'border-red-400 text-red-700 hover:border-red-500'
                       : 'border-neutral-300 hover:border-neutral-900 text-neutral-500 hover:text-neutral-900'
@@ -890,9 +1017,11 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
                     <Camera className="w-5 h-5 text-neutral-700" />
                   </div>
                   <div className="text-center">
-                    <p className="text-xs font-semibold text-neutral-800">Unggah Foto Barang Asli</p>
+                    <p className="text-xs font-semibold text-neutral-800">
+                      {isProcessingPhoto ? 'Memproses & mengompres foto...' : 'Unggah Foto Barang Asli'}
+                    </p>
                     <p className="text-[11px] text-neutral-400 mt-0.5">
-                      Klik untuk pilih hingga 5 foto (JPG / PNG)
+                      Klik untuk pilih hingga 5 foto (maks. 25MB/foto)
                     </p>
                   </div>
                 </button>
@@ -1543,10 +1672,17 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
 
                 <button
                   type="submit"
-                  className="inline-flex items-center justify-center gap-2 px-6 py-2.5 bg-neutral-900 hover:bg-black text-white text-xs font-semibold rounded-full shadow-xs transition-all active:scale-[0.97] cursor-pointer whitespace-nowrap shrink-0"
+                  disabled={isSubmittingListing}
+                  className="inline-flex items-center justify-center gap-2 px-6 py-2.5 bg-neutral-900 hover:bg-black disabled:opacity-60 text-white text-xs font-semibold rounded-full shadow-xs transition-all active:scale-[0.97] cursor-pointer whitespace-nowrap shrink-0"
                 >
                   <Plus className="w-4 h-4" />
-                  <span>{publishImmediately ? 'Tayangkan Sekarang' : 'Simpan Draft'}</span>
+                  <span>
+                    {isSubmittingListing
+                      ? 'Menyimpan...'
+                      : publishImmediately
+                        ? 'Tayangkan Sekarang'
+                        : 'Simpan Draft'}
+                  </span>
                 </button>
               </div>
             </div>
@@ -1865,11 +2001,14 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
                   {editImages.length < 5 && (
                     <button
                       type="button"
+                      disabled={isProcessingEditPhoto}
                       onClick={() => editFileInputRef.current?.click()}
-                      className="aspect-square rounded-xl border-2 border-dashed border-neutral-300 hover:border-neutral-900 bg-neutral-50 hover:bg-white flex flex-col items-center justify-center gap-0.5 text-neutral-500 hover:text-neutral-900 transition-colors cursor-pointer"
+                      className="aspect-square rounded-xl border-2 border-dashed border-neutral-300 hover:border-neutral-900 bg-neutral-50 hover:bg-white flex flex-col items-center justify-center gap-0.5 text-neutral-500 hover:text-neutral-900 transition-colors cursor-pointer disabled:opacity-50"
                     >
                       <Plus className="w-4 h-4" />
-                      <span className="text-[10px] font-semibold">Tambah</span>
+                      <span className="text-[10px] font-semibold">
+                        {isProcessingEditPhoto ? 'Memproses...' : 'Tambah'}
+                      </span>
                     </button>
                   )}
                 </div>
@@ -2237,9 +2376,10 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-neutral-900 hover:bg-black text-white font-semibold rounded-full cursor-pointer whitespace-nowrap"
+                  disabled={isSavingEdit}
+                  className="px-5 py-2 bg-neutral-900 hover:bg-black disabled:opacity-60 text-white font-semibold rounded-full cursor-pointer whitespace-nowrap"
                 >
-                  Simpan Perubahan
+                  {isSavingEdit ? 'Menyimpan...' : 'Simpan Perubahan'}
                 </button>
               </div>
             </form>
@@ -2263,7 +2403,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
             ? editReservedByUserName
             : reservedPickerTarget?.product?.reservedByUserName
         }
-        onConfirmReserve={(prod, buyer) => {
+        onConfirmReserve={async (prod, buyer) => {
           if (reservedPickerTarget?.source === 'edit') {
             setEditListingStatus('reserved');
             setEditReservedByUserId(buyer.id || '');
@@ -2271,19 +2411,27 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
             return;
           }
           if (!onUpdateProduct) return;
-          onUpdateProduct(prod.id, {
-            listingStatus: 'reserved',
-            reservedByUserId: buyer.id || '',
-            reservedByUserName: buyer.name,
-            stock: Math.max(1, prod.stock || 1),
-          });
-          triggerToast(
-            'Status Reserved Diperbarui',
-            `"${prod.name}" kini di-reserve oleh ${buyer.name}.`,
-            'system'
-          );
+          try {
+            await onUpdateProduct(prod.id, {
+              listingStatus: 'reserved',
+              reservedByUserId: buyer.id || '',
+              reservedByUserName: buyer.name,
+              stock: Math.max(1, prod.stock || 1),
+            });
+            triggerToast(
+              'Status Reserved Diperbarui',
+              `"${prod.name}" kini di-reserve oleh ${buyer.name}.`,
+              'system'
+            );
+          } catch (err) {
+            triggerToast(
+              'Gagal Memperbarui Status',
+              err instanceof Error ? err.message : 'Gagal sinkronisasi ke server.',
+              'system'
+            );
+          }
         }}
-        onUnreserve={(prod) => {
+        onUnreserve={async (prod) => {
           if (reservedPickerTarget?.source === 'edit') {
             setEditListingStatus('available');
             setEditReservedByUserId('');
@@ -2291,13 +2439,21 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
             return;
           }
           if (!onUpdateProduct) return;
-          onUpdateProduct(prod.id, {
-            listingStatus: 'available',
-            reservedByUserId: '',
-            reservedByUserName: '',
-            stock: Math.max(1, prod.stock || 1),
-          });
-          triggerToast('Reservasi Dibatalkan', `"${prod.name}" kini kembali tersedia.`, 'system');
+          try {
+            await onUpdateProduct(prod.id, {
+              listingStatus: 'available',
+              reservedByUserId: '',
+              reservedByUserName: '',
+              stock: Math.max(1, prod.stock || 1),
+            });
+            triggerToast('Reservasi Dibatalkan', `"${prod.name}" kini kembali tersedia.`, 'system');
+          } catch (err) {
+            triggerToast(
+              'Gagal Membatalkan Reservasi',
+              err instanceof Error ? err.message : 'Gagal sinkronisasi ke server.',
+              'system'
+            );
+          }
         }}
       />
     </div>

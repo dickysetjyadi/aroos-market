@@ -15,8 +15,6 @@ export interface SellerDirectoryEntry {
   previewImages: string[];
 }
 
-const FOLLOWER_DELTAS_KEY = 'aroos_store_follower_deltas_v1';
-
 export function normalizeStoreKey(nameOrHandle: string): string {
   return nameOrHandle.trim().toLowerCase();
 }
@@ -41,12 +39,13 @@ export function isStoreFollowed(
   brandName: string,
   sellerId?: string | null
 ): boolean {
+  const normalizedList = followingStores.map(normalizeFollowingEntryKey);
   const cleanId = (sellerId || '').trim();
   if (cleanId) {
-    return followingStores.includes(`id:${cleanId}`);
+    return normalizedList.includes(`id:${cleanId}`);
   }
   const nameKey = normalizeStoreKey(brandName);
-  return Boolean(nameKey && followingStores.includes(nameKey));
+  return Boolean(nameKey && normalizedList.includes(nameKey));
 }
 
 export function getFollowingStorageKey(accountId?: string | null): string | null {
@@ -76,54 +75,120 @@ export function saveFollowingStores(accountId: string, stores: string[]): void {
   } catch {}
 }
 
-export function loadFollowerDeltas(): Record<string, number> {
-  try {
-    const raw = localStorage.getItem(FOLLOWER_DELTAS_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
+function getRealFollowerAccounts(params: {
+  brandName: string;
+  sellerId?: string | null;
+  users?: UserAccount[];
+  currentProfile?: UserProfile;
+  followingStores?: string[];
+}): Array<{
+  id: string;
+  name: string;
+  brandName: string;
+  city: string;
+  avatarUrl?: string;
+  verified: boolean;
+  isCurrentUser: boolean;
+}> {
+  const {
+    brandName,
+    sellerId,
+    users = [],
+    currentProfile,
+    followingStores = [],
+  } = params;
+
+  const cleanSellerId = (sellerId || '').trim();
+  const normalizedTargetBrand = normalizeStoreKey(brandName);
+  if (!cleanSellerId && !normalizedTargetBrand) return [];
+
+  const uniqueUsers = new Map<
+    string,
+    {
+      id: string;
+      name: string;
+      brandName: string;
+      city: string;
+      avatarUrl?: string;
+      verified: boolean;
+      followingList: string[];
+      isCurrentUser: boolean;
+    }
+  >();
+
+  users.forEach((u) => {
+    if (!u || !u.id) return;
+    const isMe = Boolean(currentProfile?.isRegistered && currentProfile.id === u.id);
+    uniqueUsers.set(u.id, {
+      id: u.id,
+      name: u.name || 'Pengguna AROOS',
+      brandName: u.sellerProfile?.brandName || u.name || 'Toko AROOS',
+      city: u.sellerProfile?.brandCity || u.buyerProfile?.city || 'Indonesia',
+      avatarUrl: u.avatarUrl,
+      verified: Boolean(u.sellerProfile?.verifiedBrand),
+      followingList: isMe
+        ? followingStores
+        : Array.isArray(u.buyerProfile?.followingStores)
+          ? u.buyerProfile.followingStores
+          : [],
+      isCurrentUser: isMe,
+    });
+  });
+
+  if (currentProfile?.isRegistered && currentProfile.id && !uniqueUsers.has(currentProfile.id)) {
+    uniqueUsers.set(currentProfile.id, {
+      id: currentProfile.id,
+      name: currentProfile.name || 'Pengguna AROOS',
+      brandName: currentProfile.brandName || currentProfile.name || 'Toko AROOS',
+      city: currentProfile.brandCity || currentProfile.buyerProfile?.city || 'Indonesia',
+      avatarUrl: currentProfile.avatarUrl,
+      verified: Boolean(currentProfile.sellerProfile?.verifiedBrand),
+      followingList: followingStores,
+      isCurrentUser: true,
+    });
   }
+
+  const matched: Array<{
+    id: string;
+    name: string;
+    brandName: string;
+    city: string;
+    avatarUrl?: string;
+    verified: boolean;
+    isCurrentUser: boolean;
+  }> = [];
+
+  uniqueUsers.forEach((u) => {
+    const isTargetOwner = cleanSellerId
+      ? u.id === cleanSellerId
+      : Boolean(normalizedTargetBrand) && normalizeStoreKey(u.brandName) === normalizedTargetBrand;
+    if (isTargetOwner) return;
+
+    if (isStoreFollowed(u.followingList, brandName, cleanSellerId || undefined)) {
+      matched.push({
+        id: u.id,
+        name: u.name,
+        brandName: u.brandName,
+        city: u.city,
+        avatarUrl: u.avatarUrl,
+        verified: u.verified,
+        isCurrentUser: u.isCurrentUser,
+      });
+    }
+  });
+
+  matched.sort((a, b) => Number(b.isCurrentUser) - Number(a.isCurrentUser));
+  return matched;
 }
 
-export function updateFollowerDelta(
-  storeName: string,
-  delta: 1 | -1,
-  sellerId?: string | null
-): Record<string, number> {
-  const key = getStoreUniqueKey(storeName, sellerId);
-  const current = loadFollowerDeltas();
-  const nextVal = (Number(current[key]) || 0) + delta;
-  const next = { ...current, [key]: nextVal };
-  try {
-    localStorage.setItem(FOLLOWER_DELTAS_KEY, JSON.stringify(next));
-  } catch {}
-  return next;
-}
-
-function getBaseSeededFollowers(storeKey: string): number {
-  if (!storeKey) return 0;
-  let hash = 0;
-  for (let i = 0; i < storeKey.length; i++) {
-    hash = (hash * 31 + storeKey.charCodeAt(i)) % 97;
-  }
-  return 14 + hash;
-}
-
-export function getStoreFollowerCount(
-  storeName: string,
-  followingStores: string[],
-  deltas: Record<string, number>,
-  isOwnStore = false,
-  sellerId?: string | null
-): number {
-  const key = getStoreUniqueKey(storeName, sellerId);
-  if (!key) return 0;
-  const base = isOwnStore ? 0 : getBaseSeededFollowers(key);
-  const delta = Number(deltas[key]) || 0;
-  const isCurrentlyFollowed = isStoreFollowed(followingStores, storeName, sellerId);
-  return Math.max(isCurrentlyFollowed ? 1 : 0, base + delta);
+export function getStoreFollowerCount(params: {
+  brandName: string;
+  sellerId?: string | null;
+  users?: UserAccount[];
+  currentProfile?: UserProfile;
+  followingStores?: string[];
+}): number {
+  return getRealFollowerAccounts(params).length;
 }
 
 export function getRecentlyViewedStorageKey(accountId?: string | null): string {
@@ -363,36 +428,6 @@ export interface StoreFollower {
   followedAtLabel: string;
 }
 
-const COMMUNITY_FOLLOWER_FIRST_NAMES = [
-  'Nadia', 'Raka', 'Citra', 'Dimas', 'Tari', 'Fajar', 'Klara', 'Kevin',
-  'Maya', 'Rendra', 'Salsa', 'Bagas', 'Laras', 'Aldi', 'Vina', 'Ilham',
-  'Putri', 'Reza', 'Gita', 'Hendra', 'Dewi', 'Naufal', 'Aulia', 'Bima',
-];
-
-const COMMUNITY_FOLLOWER_LAST_NAMES = [
-  'Kusuma', 'Pratama', 'Lestari', 'Aditya', 'Wulandari', 'Nugroho', 'Wijaya', 'Halim',
-  'Sari', 'Ramadhan', 'Maharani', 'Santosa', 'Puspita', 'Saputra', 'Permata', 'Maulana',
-];
-
-const COMMUNITY_CITIES = [
-  'Jakarta Selatan', 'Bandung', 'Yogyakarta', 'Surabaya', 'Solo',
-  'Semarang', 'Depok', 'Tangerang', 'Malang', 'Denpasar', 'Bekasi', 'Bogor',
-];
-
-const FOLLOW_TIME_LABELS = [
-  '2 jam lalu', 'Kemarin', '2 hari lalu', '4 hari lalu', '1 minggu lalu',
-  '2 minggu lalu', '3 minggu lalu', '1 bulan lalu', '2 bulan lalu',
-];
-
-function hashString(input: string): number {
-  let h = 2166136261;
-  for (let i = 0; i < input.length; i++) {
-    h ^= input.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return h >>> 0;
-}
-
 function toHandle(name: string): string {
   const clean = name.toLowerCase().replace(/[^a-z0-9]/g, '');
   return `@${clean || 'pengguna'}`;
@@ -401,146 +436,54 @@ function toHandle(name: string): string {
 export function getStoreFollowersList(params: {
   brandName: string;
   sellerId?: string | null;
-  targetCount: number;
-  sellers: SellerDirectoryEntry[];
   users: UserAccount[];
   currentProfile: UserProfile;
-  isFollowedByCurrentUser: boolean;
-  isOwnStore: boolean;
+  followingStores: string[];
 }): StoreFollower[] {
-  const {
-    brandName,
-    sellerId,
-    targetCount,
-    sellers,
-    users,
-    currentProfile,
-    isFollowedByCurrentUser,
-    isOwnStore,
-  } = params;
-
-  if (targetCount <= 0 || !brandName.trim()) return [];
-
-  const targetKey = getStoreUniqueKey(brandName, sellerId);
-  const currentUserKey = currentProfile.isRegistered
-    ? getStoreUniqueKey(currentProfile.brandName || currentProfile.name || '', currentProfile.id)
-    : '';
-  const seed = hashString(targetKey);
-  const result: StoreFollower[] = [];
-  const usedIds = new Set<string>();
-  const usedHandles = new Set<string>();
-
-  // 1. Prepend the current user when viewing another store they follow
-  if (!isOwnStore && currentProfile.isRegistered && isFollowedByCurrentUser) {
-    const handle = toHandle(currentProfile.name || currentProfile.brandName || 'anda');
-    usedHandles.add(handle);
-    if (currentProfile.id) usedIds.add(currentProfile.id);
-    result.push({
-      id: currentProfile.id || 'follower-current-user',
-      sellerId: currentProfile.id,
-      displayName: currentProfile.name || currentProfile.brandName || 'Anda',
-      handle,
-      city: currentProfile.brandCity || currentProfile.buyerProfile?.city || 'Indonesia',
-      avatarUrl: currentProfile.avatarUrl,
-      storeName: currentProfile.brandName || currentProfile.name,
-      isVerified: Boolean(currentProfile.sellerProfile?.verifiedBrand),
-      isCurrentUser: true,
-      followedAtLabel: 'Baru saja',
-    });
-  }
-
-  // 2. Build pool of real registered accounts & stores in the marketplace
-  const realPool: Omit<StoreFollower, 'followedAtLabel'>[] = [];
-
-  sellers.forEach((seller) => {
-    if (seller.key === targetKey || seller.isCurrentUser) return;
-    const entryId = seller.sellerId || `follower-seller-${seller.key}`;
-    if (usedIds.has(entryId)) return;
-    usedIds.add(entryId);
-    const displayName = seller.ownerName || seller.brandName;
-    const handle = toHandle(seller.ownerName || seller.brandName);
-    realPool.push({
-      id: entryId,
-      sellerId: seller.sellerId,
-      displayName,
-      handle,
-      city: seller.city || 'Indonesia',
-      avatarUrl: seller.avatarUrl,
-      storeName: seller.brandName,
-      isVerified: seller.verified,
-    });
-  });
-
-  users.forEach((u) => {
-    const uBrand = u.sellerProfile?.brandName || u.name;
-    const uKey = getStoreUniqueKey(uBrand, u.id);
-    if (u.id === currentProfile.id || uKey === targetKey || uKey === currentUserKey) return;
-    if (usedIds.has(u.id)) return;
-    usedIds.add(u.id);
-    const handle = toHandle(u.name);
-    realPool.push({
-      id: u.id,
-      sellerId: u.id,
-      displayName: u.name,
-      handle,
-      city: u.sellerProfile?.brandCity || u.buyerProfile?.city || 'Indonesia',
-      avatarUrl: u.avatarUrl,
-      storeName: uBrand,
-      isVerified: Boolean(u.sellerProfile?.verifiedBrand),
-    });
-  });
-
-  if (realPool.length > 0 && result.length < targetCount) {
-    const offset = seed % realPool.length;
-    for (let i = 0; i < realPool.length && result.length < targetCount; i++) {
-      const candidate = realPool[(offset + i) % realPool.length];
-      result.push({
-        ...candidate,
-        followedAtLabel: FOLLOW_TIME_LABELS[(seed + i) % FOLLOW_TIME_LABELS.length],
-      });
-    }
-  }
-
-  let idx = 0;
-  while (result.length < targetCount && idx < 200) {
-    const firstIdx = (seed + idx * 7) % COMMUNITY_FOLLOWER_FIRST_NAMES.length;
-    const lastIdx = (seed + idx * 11 + Math.floor(idx / COMMUNITY_FOLLOWER_FIRST_NAMES.length)) %
-      COMMUNITY_FOLLOWER_LAST_NAMES.length;
-    const displayName = `${COMMUNITY_FOLLOWER_FIRST_NAMES[firstIdx]} ${COMMUNITY_FOLLOWER_LAST_NAMES[lastIdx]}`;
-    const baseHandle = toHandle(displayName);
-    const handle = usedHandles.has(baseHandle) ? `${baseHandle}${idx + 1}` : baseHandle;
-    usedHandles.add(handle);
-
-    const city = COMMUNITY_CITIES[(seed + idx * 5) % COMMUNITY_CITIES.length];
-    const followedAtLabel = FOLLOW_TIME_LABELS[(seed + idx * 3) % FOLLOW_TIME_LABELS.length];
-
-    result.push({
-      id: `follower-comm-${targetKey}-${idx}`,
-      displayName,
-      handle,
-      city,
-      followedAtLabel,
-    });
-    idx++;
-  }
-
-  return result;
+  const matchedAccounts = getRealFollowerAccounts(params);
+  return matchedAccounts.map((acc) => ({
+    id: acc.id,
+    sellerId: acc.id,
+    displayName: acc.name,
+    handle: toHandle(acc.name),
+    city: acc.city || 'Indonesia',
+    avatarUrl: acc.avatarUrl,
+    storeName: acc.brandName,
+    isVerified: acc.verified,
+    isCurrentUser: acc.isCurrentUser,
+    followedAtLabel: acc.isCurrentUser ? 'Baru saja' : 'Mengikuti',
+  }));
 }
 
-export function getStoreFollowingCount(
-  storeName: string,
-  ownFollowingStores: string[],
-  sellersCount: number,
-  isOwnStore = false,
-  sellerId?: string | null
-): number {
-  const key = getStoreUniqueKey(storeName, sellerId);
-  if (!key) return 0;
-  if (isOwnStore) return ownFollowingStores.length;
-  const maxAvailable = Math.max(0, sellersCount - 1);
-  if (maxAvailable === 0) return 0;
-  const seed = hashString(`following::${key}`);
-  return Math.min(maxAvailable, 3 + (seed % 7));
+function findTargetUserFollowingStores(params: {
+  brandName: string;
+  sellerId?: string | null;
+  ownFollowingStores: string[];
+  users: UserAccount[];
+  isOwnStore: boolean;
+}): string[] {
+  const { brandName, sellerId, ownFollowingStores, users, isOwnStore } = params;
+  if (isOwnStore) return ownFollowingStores;
+  const cleanSellerId = (sellerId || '').trim();
+  const normalizedTargetBrand = normalizeStoreKey(brandName);
+  const targetUser = users.find((u) => {
+    if (cleanSellerId && u.id === cleanSellerId) return true;
+    const uBrand = normalizeStoreKey(u.sellerProfile?.brandName || u.name || '');
+    return !cleanSellerId && Boolean(normalizedTargetBrand) && uBrand === normalizedTargetBrand;
+  });
+  return Array.isArray(targetUser?.buyerProfile?.followingStores)
+    ? targetUser.buyerProfile.followingStores
+    : [];
+}
+
+export function getStoreFollowingCount(params: {
+  brandName: string;
+  sellerId?: string | null;
+  ownFollowingStores: string[];
+  users: UserAccount[];
+  isOwnStore: boolean;
+}): number {
+  return findTargetUserFollowingStores(params).length;
 }
 
 export function getStoreFollowingList(params: {
@@ -548,11 +491,18 @@ export function getStoreFollowingList(params: {
   sellerId?: string | null;
   ownFollowingStores: string[];
   sellers: SellerDirectoryEntry[];
+  users: UserAccount[];
   isOwnStore: boolean;
 }): StoreFollower[] {
-  const { brandName, sellerId, ownFollowingStores, sellers, isOwnStore } = params;
-  const targetKey = getStoreUniqueKey(brandName, sellerId);
-  if (!targetKey) return [];
+  const { brandName, sellerId, ownFollowingStores, sellers, users, isOwnStore } = params;
+  const rawList = findTargetUserFollowingStores({
+    brandName,
+    sellerId,
+    ownFollowingStores,
+    users,
+    isOwnStore,
+  });
+  if (rawList.length === 0) return [];
 
   const sellerByKey = new Map(sellers.map((s) => [s.key, s]));
   const sellerByNameKey = new Map<string, SellerDirectoryEntry>();
@@ -561,54 +511,31 @@ export function getStoreFollowingList(params: {
     if (!sellerByNameKey.has(nKey)) sellerByNameKey.set(nKey, s);
   });
 
-  if (isOwnStore) {
-    return ownFollowingStores.map((key) => {
-      const seller = sellerByKey.get(key) || sellerByNameKey.get(key);
-      const displayName = seller?.brandName || (key.startsWith('id:') ? 'Lapak Terdaftar' : key);
-      return {
-        id: seller?.sellerId || `following-own-${key}`,
-        sellerId: seller?.sellerId,
-        displayName: seller?.ownerName || displayName,
-        handle: toHandle(seller?.ownerName || displayName),
-        city: seller?.city || 'Indonesia',
-        avatarUrl: seller?.avatarUrl,
-        storeName: displayName,
-        isVerified: Boolean(seller?.verified),
-        followedAtLabel: 'Diikuti',
-      };
-    });
-  }
+  const userById = new Map(users.map((u) => [u.id, u]));
 
-  const candidateSellers = sellers.filter((s) => s.key !== targetKey && !s.isCurrentUser);
-  if (candidateSellers.length === 0) return [];
-
-  const count = getStoreFollowingCount(
-    brandName,
-    ownFollowingStores,
-    candidateSellers.length + 1,
-    false,
-    sellerId
-  );
-  const seed = hashString(`following::${targetKey}`);
-  const offset = seed % candidateSellers.length;
-  const result: StoreFollower[] = [];
-
-  for (let i = 0; i < count && i < candidateSellers.length; i++) {
-    const seller = candidateSellers[(offset + i) % candidateSellers.length];
-    result.push({
-      id: seller.sellerId || `following-${targetKey}-${seller.key}`,
-      sellerId: seller.sellerId,
-      displayName: seller.ownerName || seller.brandName,
-      handle: toHandle(seller.ownerName || seller.brandName),
-      city: seller.city || 'Indonesia',
-      avatarUrl: seller.avatarUrl,
-      storeName: seller.brandName,
-      isVerified: seller.verified,
-      followedAtLabel: FOLLOW_TIME_LABELS[(seed + i * 2) % FOLLOW_TIME_LABELS.length],
-    });
-  }
-
-  return result;
+  return rawList.map((rawKey) => {
+    const key = normalizeFollowingEntryKey(rawKey);
+    const idPart = key.startsWith('id:') ? key.slice(3) : undefined;
+    const seller = sellerByKey.get(key) || sellerByNameKey.get(key);
+    const userRec = idPart ? userById.get(idPart) : undefined;
+    const displayStoreName =
+      seller?.brandName ||
+      userRec?.sellerProfile?.brandName ||
+      userRec?.name ||
+      (idPart ? 'Lapak Terdaftar' : key);
+    const ownerName = seller?.ownerName || userRec?.name || displayStoreName;
+    return {
+      id: seller?.sellerId || userRec?.id || `following-${key}`,
+      sellerId: seller?.sellerId || userRec?.id,
+      displayName: ownerName,
+      handle: toHandle(ownerName),
+      city: seller?.city || userRec?.sellerProfile?.brandCity || userRec?.buyerProfile?.city || 'Indonesia',
+      avatarUrl: seller?.avatarUrl || userRec?.avatarUrl,
+      storeName: displayStoreName,
+      isVerified: Boolean(seller?.verified ?? userRec?.sellerProfile?.verifiedBrand),
+      followedAtLabel: 'Diikuti',
+    };
+  });
 }
 
 export async function copyTextToClipboard(text: string): Promise<boolean> {

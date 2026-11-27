@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import { compressImageForUpload } from '../utils/imageCompression';
 import { X, Star, Camera, CheckCircle2, Loader2 } from 'lucide-react';
 import { Order, Review } from '../types';
 import {
@@ -15,6 +16,7 @@ interface PostOrderReviewModalProps {
   onSubmitReview: (review: Omit<Review, 'id' | 'date' | 'helpfulCount'>) => Promise<void> | void;
   reviewerName: string;
   reviewerCity: string;
+  reviewedOrderItemKeys?: string[];
 }
 
 export const PostOrderReviewModal: React.FC<PostOrderReviewModalProps> = ({
@@ -24,6 +26,7 @@ export const PostOrderReviewModal: React.FC<PostOrderReviewModalProps> = ({
   onSubmitReview,
   reviewerName,
   reviewerCity,
+  reviewedOrderItemKeys = [],
 }) => {
   const [stage, setStage] = useState<'prompt' | 'form'>('prompt');
   const [selectedItemIndex, setSelectedItemIndex] = useState(0);
@@ -40,8 +43,14 @@ export const PostOrderReviewModal: React.FC<PostOrderReviewModalProps> = ({
 
   useEffect(() => {
     if (isOpen) {
+      const orderItems = order?.items || [];
+      const firstUnreviewedIdx = order
+        ? orderItems.findIndex(
+            (item) => !reviewedOrderItemKeys.includes(`${order.id}__${item.productId}`)
+          )
+        : 0;
       setStage('prompt');
-      setSelectedItemIndex(0);
+      setSelectedItemIndex(firstUnreviewedIdx >= 0 ? firstUnreviewedIdx : 0);
       setRating(5);
       setFitFeedback('Pas');
       setComment('');
@@ -55,9 +64,13 @@ export const PostOrderReviewModal: React.FC<PostOrderReviewModalProps> = ({
 
   const items = order?.items || [];
   const targetItem = items[selectedItemIndex] || items[0] || null;
+  const isTargetItemReviewed = Boolean(
+    order && targetItem && reviewedOrderItemKeys.includes(`${order.id}__${targetItem.productId}`)
+  );
 
-  const handlePhotoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handlePhotoChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
+    e.target.value = '';
     if (files.length === 0) return;
 
     setPhotoError(null);
@@ -68,26 +81,31 @@ export const PostOrderReviewModal: React.FC<PostOrderReviewModalProps> = ({
     }
 
     const toProcess = files.slice(0, remainingSlots);
-    toProcess.forEach((file) => {
-      if (file.size > 5 * 1024 * 1024) {
-        setPhotoError('Ukuran foto maksimal 5MB.');
-        return;
+    for (const file of toProcess) {
+      if (file.size > 25 * 1024 * 1024) {
+        setPhotoError('Ukuran foto maksimal 25MB.');
+        continue;
       }
-      const reader = new FileReader();
-      reader.onload = (ev) => {
-        const result = ev.target?.result;
-        if (typeof result === 'string') {
-          setPhotos((prev) => (prev.length < 4 ? [...prev, result] : prev));
-        }
-      };
-      reader.readAsDataURL(file);
-    });
-    e.target.value = '';
+      try {
+        const compressed = await compressImageForUpload(file, {
+          maxDimension: 760,
+          quality: 0.72,
+          maxDataUrlLength: 200_000,
+        });
+        setPhotos((prev) => (prev.length < 4 ? [...prev, compressed] : prev));
+      } catch (err) {
+        setPhotoError(err instanceof Error ? err.message : 'Gagal memproses foto.');
+      }
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!targetItem) return;
+    if (isTargetItemReviewed) {
+      setFormError('Barang ini sudah Anda ulas untuk pesanan ini.');
+      return;
+    }
 
     const cleanComment = comment.trim();
     if (!cleanComment) {
@@ -213,20 +231,28 @@ export const PostOrderReviewModal: React.FC<PostOrderReviewModalProps> = ({
                       Pilih Barang yang Diulas
                     </label>
                     <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-0.5">
-                      {items.map((item, idx) => (
-                        <button
-                          key={`${item.productId}-${idx}`}
-                          type="button"
-                          onClick={() => setSelectedItemIndex(idx)}
-                          className={`px-3 py-2 rounded-xl border text-xs font-semibold whitespace-nowrap shrink-0 cursor-pointer transition-all ${
-                            selectedItemIndex === idx
-                              ? 'bg-neutral-900 text-white border-neutral-900'
-                              : 'bg-neutral-50 text-neutral-700 border-neutral-200 hover:border-neutral-400'
-                          }`}
-                        >
-                          {item.productName}
-                        </button>
-                      ))}
+                      {items.map((item, idx) => {
+                        const alreadyDone = Boolean(
+                          order && reviewedOrderItemKeys.includes(`${order.id}__${item.productId}`)
+                        );
+                        return (
+                          <button
+                            key={`${item.productId}-${idx}`}
+                            type="button"
+                            disabled={alreadyDone}
+                            onClick={() => setSelectedItemIndex(idx)}
+                            className={`px-3 py-2 rounded-xl border text-xs font-semibold whitespace-nowrap shrink-0 transition-all ${
+                              alreadyDone
+                                ? 'bg-emerald-50 text-emerald-700 border-emerald-200 opacity-75 cursor-not-allowed'
+                                : selectedItemIndex === idx
+                                ? 'bg-neutral-900 text-white border-neutral-900 cursor-pointer'
+                                : 'bg-neutral-50 text-neutral-700 border-neutral-200 hover:border-neutral-400 cursor-pointer'
+                            }`}
+                          >
+                            {item.productName}{alreadyDone ? ' · Sudah Diulas' : ''}
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
                 )}
@@ -374,11 +400,17 @@ export const PostOrderReviewModal: React.FC<PostOrderReviewModalProps> = ({
                   </button>
                   <button
                     type="submit"
-                    disabled={isSubmitting}
+                    disabled={isSubmitting || isTargetItemReviewed}
                     className="flex-1 min-h-[44px] px-4 py-2.5 bg-neutral-900 hover:bg-black disabled:opacity-50 text-white text-xs sm:text-sm font-bold rounded-2xl cursor-pointer inline-flex items-center justify-center gap-2"
                   >
                     {isSubmitting && <Loader2 className="w-4 h-4 animate-spin" />}
-                    <span>{isSubmitting ? 'Mengirim...' : 'Kirim Ulasan'}</span>
+                    <span>
+                      {isTargetItemReviewed
+                        ? 'Sudah Diulas'
+                        : isSubmitting
+                        ? 'Mengirim...'
+                        : 'Kirim Ulasan'}
+                    </span>
                   </button>
                 </div>
               </form>

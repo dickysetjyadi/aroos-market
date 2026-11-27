@@ -35,6 +35,7 @@ import { formatPresenceLabel, subscribeToAllPresences } from '../services/presen
 import { isProductOwnedByUser, isStoreOwnedByUser, normalizeIdentityKey } from '../utils/ownership';
 import { getAllUsersFromDb } from '../utils/userDb';
 import { useConfirm } from './ConfirmDialogContext';
+import { compressImageForUpload } from '../utils/imageCompression';
 import { ReservedBuyerModal } from './ReservedBuyerModal';
 import { ReportTarget } from './ReportModal';
 import {
@@ -367,6 +368,8 @@ interface ChatModalProps {
     buyerPhone: string;
     buyerCity: string;
     buyerAddress: string;
+    size?: string;
+    color?: string;
     convId: string;
   }) => Promise<string | void>;
   onNotifyUser?: (notif: Omit<NotificationItem, 'id' | 'time' | 'read'>) => void;
@@ -419,6 +422,7 @@ export const ChatModal: React.FC<ChatModalProps> = ({
 
   const [inputText, setInputText] = useState<string>('');
   const [attachedImage, setAttachedImage] = useState<string | null>(null);
+  const [isCompressingPhoto, setIsCompressingPhoto] = useState(false);
   const [composerError, setComposerError] = useState<string | null>(null);
   const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
 
@@ -445,6 +449,8 @@ export const ChatModal: React.FC<ChatModalProps> = ({
   const [dealBuyerPhone, setDealBuyerPhone] = useState<string>('');
   const [dealBuyerCity, setDealBuyerCity] = useState<string>('');
   const [dealBuyerAddress, setDealBuyerAddress] = useState<string>('');
+  const [dealSize, setDealSize] = useState<string>('');
+  const [dealColor, setDealColor] = useState<string>('');
   const [isSubmittingDeal, setIsSubmittingDeal] = useState<boolean>(false);
   const [reservePickerTarget, setReservePickerTarget] = useState<{
     product: Product;
@@ -1017,25 +1023,38 @@ export const ChatModal: React.FC<ChatModalProps> = ({
     setLastRemovedChat(null);
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
 
-    if (file.size > 5 * 1024 * 1024) {
-      setComposerError('Ukuran file foto maksimal 5MB.');
+    if (file.size > 25 * 1024 * 1024) {
+      setComposerError('Ukuran file foto maksimal 25MB.');
       return;
     }
-    setComposerError(null);
 
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      setAttachedImage(event.target?.result as string);
-    };
-    reader.readAsDataURL(file);
-    e.target.value = '';
+    setComposerError(null);
+    setIsCompressingPhoto(true);
+    try {
+      const compressed = await compressImageForUpload(file, {
+        maxDimension: 900,
+        quality: 0.78,
+        maxDataUrlLength: 480_000,
+      });
+      setAttachedImage(compressed);
+    } catch (err) {
+      setAttachedImage(null);
+      setComposerError(
+        err instanceof Error
+          ? err.message
+          : 'Foto gagal diproses. Coba ambil ulang atau pilih foto lain.'
+      );
+    } finally {
+      setIsCompressingPhoto(false);
+    }
   };
 
-  const sendMessageCore = (
+  const sendMessageCore = async (
     text: string,
     options?: {
       image?: string;
@@ -1047,10 +1066,11 @@ export const ChatModal: React.FC<ChatModalProps> = ({
       notifyTitle?: string;
       notifyMessage?: string;
     }
-  ) => {
-    if (!activeConversation) return;
-    const currentConvId = activeConversation.id;
-    const role = getRoleInConversation(activeConversation, userProfile);
+  ): Promise<boolean> => {
+    if (!activeConversation) return false;
+    const prevConversation = activeConversation;
+    const currentConvId = prevConversation.id;
+    const role = getRoleInConversation(prevConversation, userProfile);
     const senderType: 'user' | 'store' = role === 'seller' ? 'store' : 'user';
     const nowIso = new Date().toISOString();
     const timeLabel = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
@@ -1061,8 +1081,8 @@ export const ChatModal: React.FC<ChatModalProps> = ({
       sender: senderType,
       senderId: userProfile.id,
       senderName: userProfile.name,
-      storeId: activeConversation.storeId,
-      storeName: activeConversation.storeName,
+      storeId: prevConversation.storeId,
+      storeName: prevConversation.storeName,
       text,
       timestamp: timeLabel,
       image: options?.image,
@@ -1077,14 +1097,14 @@ export const ChatModal: React.FC<ChatModalProps> = ({
     const unreadPatch: Partial<ChatConversation> =
       role === 'seller'
         ? {
-            buyerUnreadCount: (activeConversation.buyerUnreadCount || 0) + 1,
+            buyerUnreadCount: (prevConversation.buyerUnreadCount || 0) + 1,
             sellerUnreadCount: 0,
-            unreadCount: (activeConversation.buyerUnreadCount || 0) + 1,
+            unreadCount: (prevConversation.buyerUnreadCount || 0) + 1,
           }
         : {
-            sellerUnreadCount: (activeConversation.sellerUnreadCount || 0) + 1,
+            sellerUnreadCount: (prevConversation.sellerUnreadCount || 0) + 1,
             buyerUnreadCount: 0,
-            unreadCount: (activeConversation.sellerUnreadCount || 0) + 1,
+            unreadCount: (prevConversation.sellerUnreadCount || 0) + 1,
           };
 
     const convPatch: Partial<ChatConversation> = {
@@ -1104,51 +1124,82 @@ export const ChatModal: React.FC<ChatModalProps> = ({
       [currentConvId]: [...(prev[currentConvId] || []), newMsg],
     }));
 
+    const persistedConv: ChatConversation = {
+      ...prevConversation,
+      ...convPatch,
+    };
+
     if (isDraft) {
-      const persistedConv: ChatConversation = {
-        ...activeConversation,
-        ...convPatch,
-      };
       setLiveConversations((prev) => [
         persistedConv,
         ...prev.filter((c) => c.id !== currentConvId),
       ]);
       setDraftConversation(null);
-      void saveConversationInFirestore(persistedConv);
     } else {
       setLiveConversations((prev) =>
         prev.map((c) => (c.id === currentConvId ? { ...c, ...convPatch } : c))
       );
-      void updateConversationInFirestore(currentConvId, convPatch);
     }
 
-    void sendChatMessageInFirestore(currentConvId, newMsg);
+    try {
+      if (isDraft) {
+        await saveConversationInFirestore(persistedConv);
+      } else {
+        await updateConversationInFirestore(currentConvId, convPatch, prevConversation);
+      }
+      await sendChatMessageInFirestore(currentConvId, newMsg);
+    } catch (err) {
+      // Roll back optimistic message and conversation update so failed writes never look sent
+      setMessagesByConv((prev) => ({
+        ...prev,
+        [currentConvId]: (prev[currentConvId] || []).filter((m) => m.id !== newMsg.id),
+      }));
+      if (isDraft) {
+        setLiveConversations((prev) => prev.filter((c) => c.id !== currentConvId));
+        setDraftConversation(prevConversation);
+      } else {
+        setLiveConversations((prev) =>
+          prev.map((c) => (c.id === currentConvId ? prevConversation : c))
+        );
+      }
+      setComposerError(
+        err instanceof Error
+          ? err.message
+          : 'Pesan gagal dikirim ke server. Periksa koneksi internet Anda.'
+      );
+      return false;
+    }
 
     if (onNotifyUser) {
       const targetUserId =
-        role === 'seller' ? activeConversation.buyerId : activeConversation.sellerId;
-      const targetBrand = role === 'buyer' ? activeConversation.storeName : undefined;
+        role === 'seller' ? prevConversation.buyerId : prevConversation.sellerId;
+      const targetBrand = role === 'buyer' ? prevConversation.storeName : undefined;
       if (targetUserId || targetBrand) {
         onNotifyUser({
           type: 'chat',
           title:
             options?.notifyTitle ||
-            `Pesan dari ${role === 'seller' ? activeConversation.storeName : userProfile.name || 'Pembeli'}`,
+            `Pesan dari ${role === 'seller' ? prevConversation.storeName : userProfile.name || 'Pembeli'}`,
           message:
             options?.notifyMessage ||
-            `${activeConversation.product.name}: ${text.replace(/\n+/g, ' ').slice(0, 140)}`,
+            `${prevConversation.product.name}: ${text.replace(/\n+/g, ' ').slice(0, 140)}`,
           recipientUserId: targetUserId,
           recipientBrandName: targetBrand,
           targetRole: role === 'seller' ? 'buyer' : 'seller',
         });
       }
     }
+
+    return true;
   };
 
   // Standard chat send (NO fake auto-reply!)
-  const handleSendMessage = (textToSend?: string) => {
-    const text = (textToSend ?? inputText).trim();
-    if (!text && !attachedImage) return;
+  const handleSendMessage = async (textToSend?: string) => {
+    if (isCompressingPhoto) return;
+    const rawDraft = textToSend ?? inputText;
+    const text = rawDraft.trim();
+    const imgSnapshot = attachedImage;
+    if (!text && !imgSnapshot) return;
     if (!activeConversation) return;
     setComposerError(null);
 
@@ -1160,12 +1211,21 @@ export const ChatModal: React.FC<ChatModalProps> = ({
     lastTypingConvRef.current = null;
     void updateTypingStatusInFirestore(activeConversation.id, activeRole, 0);
 
-    sendMessageCore(text || 'Lampiran foto produk', {
-      image: attachedImage || undefined,
+    if (textToSend === undefined) {
+      setInputText('');
+      setAttachedImage(null);
+    }
+
+    const ok = await sendMessageCore(text || 'Lampiran foto produk', {
+      image: imgSnapshot || undefined,
     });
 
-    setInputText('');
-    setAttachedImage(null);
+    if (!ok && textToSend === undefined) {
+      setInputText((curr) => curr || rawDraft);
+      if (imgSnapshot) {
+        setAttachedImage((curr) => curr || imgSnapshot);
+      }
+    }
   };
 
   const handleComposerChange = (nextText: string) => {
@@ -1239,7 +1299,7 @@ export const ChatModal: React.FC<ChatModalProps> = ({
       if (!ok) return;
 
       const formatted = formatAddressMessage(saved);
-      sendMessageCore(formatted, {
+      await sendMessageCore(formatted, {
         messageType: 'address',
         convPatch: {
           buyerPhone: saved.phone,
@@ -1276,7 +1336,7 @@ export const ChatModal: React.FC<ChatModalProps> = ({
       }
       setIsAddressModalOpen(false);
       const formatted = formatAddressMessage(payload);
-      sendMessageCore(formatted, {
+      await sendMessageCore(formatted, {
         messageType: 'address',
         convPatch: {
           buyerPhone: payload.phone,
@@ -1286,6 +1346,10 @@ export const ChatModal: React.FC<ChatModalProps> = ({
         notifyTitle: `${payload.name} mengirim alamat`,
         notifyMessage: `${activeConversation?.product.name || 'Produk'}: ${payload.city}`,
       });
+    } catch (err) {
+      setComposerError(
+        err instanceof Error ? err.message : 'Gagal menyimpan atau mengirim alamat.'
+      );
     } finally {
       setAddrSaving(false);
     }
@@ -1305,7 +1369,7 @@ export const ChatModal: React.FC<ChatModalProps> = ({
     });
     if (!ok) return;
 
-    sendMessageCore(`Menawar Rp ${offeredNum.toLocaleString('id-ID')}`, {
+    const sent = await sendMessageCore(`Menawar Rp ${offeredNum.toLocaleString('id-ID')}`, {
       messageType: 'offer',
       offerAmount: offeredNum,
       offerStatus: 'pending',
@@ -1318,8 +1382,10 @@ export const ChatModal: React.FC<ChatModalProps> = ({
       notifyMessage: `${userProfile.name || 'Pembeli'} menawar "${activeConversation.product.name}". Buka chat untuk merespons.`,
     });
 
-    setIsOfferOpen(false);
-    setOfferPriceInput('');
+    if (sent) {
+      setIsOfferOpen(false);
+      setOfferPriceInput('');
+    }
   };
 
   // Seller accepts or rejects buyer's pending offer
@@ -1335,13 +1401,11 @@ export const ChatModal: React.FC<ChatModalProps> = ({
     });
     if (!ok) return;
 
-    // Update any pending offer message card in this conversation
     const pendingMsgs = activeMessages.filter(
       (m) => m.messageType === 'offer' && m.offerStatus === 'pending'
     );
-    pendingMsgs.forEach((m) => {
-      void updateChatMessageOfferStatusInFirestore(activeConversation.id, m.id, decision);
-    });
+    const prevMsgsSnapshot = pendingMsgs.map((m) => ({ id: m.id, status: m.offerStatus }));
+
     setMessagesByConv((prev) => ({
       ...prev,
       [activeConversation.id]: (prev[activeConversation.id] || []).map((m) =>
@@ -1351,12 +1415,32 @@ export const ChatModal: React.FC<ChatModalProps> = ({
       ),
     }));
 
+    try {
+      await Promise.all(
+        pendingMsgs.map((m) =>
+          updateChatMessageOfferStatusInFirestore(activeConversation.id, m.id, decision)
+        )
+      );
+    } catch (err) {
+      setMessagesByConv((prev) => ({
+        ...prev,
+        [activeConversation.id]: (prev[activeConversation.id] || []).map((m) => {
+          const orig = prevMsgsSnapshot.find((s) => s.id === m.id);
+          return orig ? { ...m, offerStatus: orig.status } : m;
+        }),
+      }));
+      setComposerError(
+        err instanceof Error ? err.message : 'Gagal memperbarui status tawaran di server.'
+      );
+      return;
+    }
+
     const text =
       decision === 'accepted'
         ? `Tawaran Rp ${price.toLocaleString('id-ID')} disetujui! Silakan kirim alamat via tombol "Alamat Saya" atau catat deal.`
         : `Maaf kak, tawaran Rp ${price.toLocaleString('id-ID')} belum bisa dilepas. Silakan ajukan penawaran baru ya.`;
 
-    sendMessageCore(text, {
+    await sendMessageCore(text, {
       messageType: 'offer_response',
       offerAmount: price,
       offerStatus: decision,
@@ -1390,9 +1474,8 @@ export const ChatModal: React.FC<ChatModalProps> = ({
     const pendingMsgs = activeMessages.filter(
       (m) => m.messageType === 'offer' && m.offerStatus === 'pending'
     );
-    pendingMsgs.forEach((m) => {
-      void updateChatMessageOfferStatusInFirestore(activeConversation.id, m.id, 'countered');
-    });
+    const prevMsgsSnapshot = pendingMsgs.map((m) => ({ id: m.id, status: m.offerStatus }));
+
     setMessagesByConv((prev) => ({
       ...prev,
       [activeConversation.id]: (prev[activeConversation.id] || []).map((m) =>
@@ -1402,7 +1485,27 @@ export const ChatModal: React.FC<ChatModalProps> = ({
       ),
     }));
 
-    sendMessageCore(`Menawarkan harga balasan Rp ${counterNum.toLocaleString('id-ID')}`, {
+    try {
+      await Promise.all(
+        pendingMsgs.map((m) =>
+          updateChatMessageOfferStatusInFirestore(activeConversation.id, m.id, 'countered')
+        )
+      );
+    } catch (err) {
+      setMessagesByConv((prev) => ({
+        ...prev,
+        [activeConversation.id]: (prev[activeConversation.id] || []).map((m) => {
+          const orig = prevMsgsSnapshot.find((s) => s.id === m.id);
+          return orig ? { ...m, offerStatus: orig.status } : m;
+        }),
+      }));
+      setComposerError(
+        err instanceof Error ? err.message : 'Gagal memperbarui status tawaran di server.'
+      );
+      return;
+    }
+
+    const sent = await sendMessageCore(`Menawarkan harga balasan Rp ${counterNum.toLocaleString('id-ID')}`, {
       messageType: 'counter_offer',
       counterAmount: counterNum,
       offerStatus: 'countered',
@@ -1415,8 +1518,10 @@ export const ChatModal: React.FC<ChatModalProps> = ({
       notifyMessage: `${activeConversation.storeName} membalas tawaran Anda untuk ${activeConversation.product.name}.`,
     });
 
-    setIsCounterOpen(false);
-    setCounterPriceInput('');
+    if (sent) {
+      setIsCounterOpen(false);
+      setCounterPriceInput('');
+    }
   };
 
   // Buyer agrees to seller's counter-offer
@@ -1434,9 +1539,8 @@ export const ChatModal: React.FC<ChatModalProps> = ({
     const counteredMsgs = activeMessages.filter(
       (m) => m.messageType === 'counter_offer' && m.offerStatus === 'countered'
     );
-    counteredMsgs.forEach((m) => {
-      void updateChatMessageOfferStatusInFirestore(activeConversation.id, m.id, 'accepted');
-    });
+    const prevMsgsSnapshot = counteredMsgs.map((m) => ({ id: m.id, status: m.offerStatus }));
+
     setMessagesByConv((prev) => ({
       ...prev,
       [activeConversation.id]: (prev[activeConversation.id] || []).map((m) =>
@@ -1446,7 +1550,27 @@ export const ChatModal: React.FC<ChatModalProps> = ({
       ),
     }));
 
-    sendMessageCore(`Deal disepakati di harga Rp ${agreedPrice.toLocaleString('id-ID')}!`, {
+    try {
+      await Promise.all(
+        counteredMsgs.map((m) =>
+          updateChatMessageOfferStatusInFirestore(activeConversation.id, m.id, 'accepted')
+        )
+      );
+    } catch (err) {
+      setMessagesByConv((prev) => ({
+        ...prev,
+        [activeConversation.id]: (prev[activeConversation.id] || []).map((m) => {
+          const orig = prevMsgsSnapshot.find((s) => s.id === m.id);
+          return orig ? { ...m, offerStatus: orig.status } : m;
+        }),
+      }));
+      setComposerError(
+        err instanceof Error ? err.message : 'Gagal menyetujui harga balasan di server.'
+      );
+      return;
+    }
+
+    await sendMessageCore(`Deal disepakati di harga Rp ${agreedPrice.toLocaleString('id-ID')}!`, {
       messageType: 'offer_response',
       offerAmount: agreedPrice,
       offerStatus: 'accepted',
@@ -1543,6 +1667,9 @@ export const ChatModal: React.FC<ChatModalProps> = ({
     }
     setDealPaymentMethod('transfer_langsung');
     setDealCourier('Kurir Reguler (JNE / J&T / SiCepat)');
+    const linkedProd = products.find((p) => p.id === activeConversation.product.id);
+    setDealSize(linkedProd?.sizes?.[0] || 'Standar');
+    setDealColor(linkedProd?.colors?.[0] || 'Default');
     setIsDealModalOpen(true);
   };
 
@@ -1573,18 +1700,22 @@ export const ChatModal: React.FC<ChatModalProps> = ({
         buyerPhone: dealBuyerPhone.trim(),
         buyerCity: dealBuyerCity.trim(),
         buyerAddress: dealBuyerAddress.trim(),
+        size: dealSize || undefined,
+        color: dealColor || undefined,
         convId: activeConversation.id,
       });
 
       const methodLabel = dealPaymentMethod === 'cod' ? 'COD / Ketemuan' : 'Transfer Langsung';
+      const variantLabel = [dealSize, dealColor].filter(Boolean).join(' · ');
       const summary = [
         `Deal Tercatat ${orderNum ? `(${orderNum})` : ''}`.trim(),
         `Harga Deal: Rp ${dealPrice.toLocaleString('id-ID')}`,
+        ...(variantLabel ? [`Varian: ${variantLabel}`] : []),
         `Metode: ${methodLabel}`,
         `Penerima: ${dealBuyerName.trim()} (${dealBuyerCity.trim()})`,
       ].join('\n');
 
-      sendMessageCore(summary, {
+      await sendMessageCore(summary, {
         messageType: 'deal',
         offerAmount: dealPrice,
         convPatch: {
@@ -1595,6 +1726,10 @@ export const ChatModal: React.FC<ChatModalProps> = ({
       });
 
       setIsDealModalOpen(false);
+    } catch (err) {
+      setComposerError(
+        err instanceof Error ? err.message : 'Gagal mencatat deal ke server. Silakan coba lagi.'
+      );
     } finally {
       setIsSubmittingDeal(false);
     }
@@ -2487,11 +2622,13 @@ export const ChatModal: React.FC<ChatModalProps> = ({
                                   }`}
                                 >
                                   {msg.image && (
-                                    <div className="mb-2 rounded-xl overflow-hidden max-h-48 border border-black/5">
+                                    <div className="mb-2 rounded-xl overflow-hidden max-w-[230px] border border-black/10 bg-black/5">
                                       <img
                                         src={msg.image}
-                                        alt=""
-                                        className="w-full h-full object-cover"
+                                        alt="Lampiran foto"
+                                        loading="eager"
+                                        decoding="async"
+                                        className="block w-full max-h-60 object-cover"
                                         referrerPolicy="no-referrer"
                                       />
                                     </div>
@@ -2546,19 +2683,28 @@ export const ChatModal: React.FC<ChatModalProps> = ({
                     )}
 
                     {/* Attached photo thumbnail preview before send */}
-                    {attachedImage && (
-                      <div className="px-4 py-2 bg-neutral-50 border-t border-neutral-200 flex items-center gap-2 shrink-0">
-                        <div className="relative w-12 h-12 rounded-xl overflow-hidden border border-neutral-200 bg-white shadow-2xs shrink-0">
-                          <img src={attachedImage} alt="" className="w-full h-full object-cover" />
-                          <button
-                            type="button"
-                            onClick={() => setAttachedImage(null)}
-                            className="absolute top-0.5 right-0.5 p-0.5 bg-black/75 hover:bg-neutral-900 text-white rounded-full cursor-pointer"
-                            aria-label="Hapus foto lampiran"
-                          >
-                            <X className="w-3 h-3" />
-                          </button>
-                        </div>
+                    {(attachedImage || isCompressingPhoto) && (
+                      <div className="px-4 py-2 bg-neutral-50 border-t border-neutral-200 flex items-center gap-2.5 shrink-0">
+                        {isCompressingPhoto ? (
+                          <div className="flex items-center gap-2 text-xs text-neutral-600 py-1">
+                            <div className="w-4 h-4 rounded-full border-2 border-neutral-300 border-t-neutral-900 animate-spin" />
+                            <span>Mengompresi foto kamera...</span>
+                          </div>
+                        ) : (
+                          attachedImage && (
+                            <div className="relative w-12 h-12 rounded-xl overflow-hidden border border-neutral-200 bg-white shadow-2xs shrink-0">
+                              <img src={attachedImage} alt="" className="w-full h-full object-cover" />
+                              <button
+                                type="button"
+                                onClick={() => setAttachedImage(null)}
+                                className="absolute top-0.5 right-0.5 p-0.5 bg-black/75 hover:bg-neutral-900 text-white rounded-full cursor-pointer"
+                                aria-label="Hapus foto lampiran"
+                              >
+                                <X className="w-3 h-3" />
+                              </button>
+                            </div>
+                          )
+                        )}
                       </div>
                     )}
 
@@ -2632,7 +2778,7 @@ export const ChatModal: React.FC<ChatModalProps> = ({
                       <button
                         type="button"
                         onClick={() => handleSendMessage()}
-                        disabled={!inputText.trim() && !attachedImage}
+                        disabled={isCompressingPhoto || (!inputText.trim() && !attachedImage)}
                         className="w-10 h-10 bg-neutral-900 hover:bg-neutral-800 disabled:opacity-30 text-white rounded-2xl flex items-center justify-center transition-all active:scale-95 cursor-pointer shrink-0 shadow-xs"
                         aria-label="Kirim Pesan"
                       >
@@ -3070,6 +3216,49 @@ export const ChatModal: React.FC<ChatModalProps> = ({
                           </select>
                         </div>
                       )}
+
+                      {(() => {
+                        const linkedProd = products.find((p) => p.id === activeConversation.product.id);
+                        const sizes = linkedProd?.sizes || [];
+                        const colors = linkedProd?.colors || [];
+                        if (sizes.length === 0 && colors.length === 0) return null;
+                        return (
+                          <div className="grid grid-cols-2 gap-2.5">
+                            {sizes.length > 0 && (
+                              <div>
+                                <label className="text-xs font-semibold text-neutral-700 block mb-1">
+                                  Ukuran
+                                </label>
+                                <select
+                                  value={dealSize}
+                                  onChange={(e) => setDealSize(e.target.value)}
+                                  className="w-full px-3 py-2 bg-neutral-50 border border-neutral-200 rounded-xl text-xs focus:bg-white focus:border-neutral-900 focus:outline-none"
+                                >
+                                  {sizes.map((s) => (
+                                    <option key={s} value={s}>{s}</option>
+                                  ))}
+                                </select>
+                              </div>
+                            )}
+                            {colors.length > 0 && (
+                              <div>
+                                <label className="text-xs font-semibold text-neutral-700 block mb-1">
+                                  Warna
+                                </label>
+                                <select
+                                  value={dealColor}
+                                  onChange={(e) => setDealColor(e.target.value)}
+                                  className="w-full px-3 py-2 bg-neutral-50 border border-neutral-200 rounded-xl text-xs focus:bg-white focus:border-neutral-900 focus:outline-none"
+                                >
+                                  {colors.map((c) => (
+                                    <option key={c} value={c}>{c}</option>
+                                  ))}
+                                </select>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
 
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                         <div>

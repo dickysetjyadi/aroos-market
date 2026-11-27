@@ -16,7 +16,13 @@ import {
   normalizeEmail,
   saveUserToDb,
 } from '../utils/userDb';
-import { hashEmailKey } from './phoneAuthService';
+import {
+  hashEmailKey,
+  sanitizeBuyerProfile,
+  sanitizeSellerProfile,
+  syncPublicProfileToFirestore,
+} from './phoneAuthService';
+import { hashPassword } from '../utils/passwordHash';
 
 export interface AdminLoginResponse {
   token: string;
@@ -90,44 +96,117 @@ function markUserDeleted(userId: string): void {
   } catch {}
 }
 
+function sanitizeUserForClient(
+  raw: UserAccount & { city?: string; followingStores?: string[] },
+  includePrivatePii: boolean
+): UserAccount {
+  const baseCity =
+    raw.buyerProfile?.city || raw.city || raw.sellerProfile?.brandCity || 'Jakarta';
+  const followingStores =
+    raw.buyerProfile?.followingStores || raw.followingStores || [];
+
+  if (includePrivatePii) {
+    return {
+      ...raw,
+      password: '',
+    };
+  }
+
+  return {
+    id: raw.id,
+    name: raw.name || 'Pengguna AROOS',
+    avatarUrl: raw.avatarUrl || '',
+    email: '',
+    phone: '',
+    password: '',
+    roles: raw.roles || ['buyer', 'seller'],
+    activeRole: raw.activeRole || 'buyer',
+    accountStatus: raw.accountStatus || 'active',
+    buyerProfile: {
+      city: baseCity,
+      followingStores,
+    },
+    sellerProfile: raw.sellerProfile,
+    createdAt: raw.createdAt || '',
+    updatedAt: raw.updatedAt,
+  };
+}
+
 export function subscribeToAllUsers(
-  onUpdate: (users: UserAccount[]) => void
+  onUpdate: (users: UserAccount[]) => void,
+  options?: { includePrivatePii?: boolean }
 ): () => void {
-  const mergeAndEmit = (firestoreUsers: UserAccount[]) => {
-    const deletedIds = getDeletedUserIds();
-    const map = new Map<string, UserAccount>();
-    getAllUsersFromDb().forEach((u) => {
-      if (u && u.id && !deletedIds.has(u.id)) map.set(u.id, u);
-    });
-    firestoreUsers.forEach((u) => {
-      if (u && u.id && !deletedIds.has(u.id)) {
-        saveUserToDb(u);
-        map.set(u.id, u);
-      }
-    });
-    const list = Array.from(map.values()).sort((a, b) =>
-      (b.createdAt || b.id).localeCompare(a.createdAt || a.id)
-    );
-    onUpdate(list);
+  const includePrivatePii = Boolean(options?.includePrivatePii);
+  const sortUsers = (list: UserAccount[]) =>
+    [...list].sort((a, b) => (b.createdAt || b.id).localeCompare(a.createdAt || a.id));
+
+  let publicMap = new Map<string, UserAccount>();
+  let legacyMap = new Map<string, UserAccount>();
+
+  const emitMerged = () => {
+    const merged = new Map<string, UserAccount>();
+    legacyMap.forEach((u, id) => merged.set(id, sanitizeUserForClient(u, includePrivatePii)));
+    if (!includePrivatePii) {
+      publicMap.forEach((u, id) => merged.set(id, sanitizeUserForClient(u, false)));
+    }
+    const sorted = sortUsers(Array.from(merged.values()));
+    if (!includePrivatePii) {
+      try {
+        localStorage.setItem('nura_users_database', JSON.stringify(sorted));
+      } catch {}
+    }
+    onUpdate(sorted);
   };
 
   try {
-    return onSnapshot(
+    const unsubPublic = includePrivatePii
+      ? () => {}
+      : onSnapshot(
+          collection(db, 'public_profiles'),
+          (snapshot) => {
+            const next = new Map<string, UserAccount>();
+            snapshot.forEach((docSnap) => {
+              const data = docSnap.data() as UserAccount & { city?: string; followingStores?: string[] };
+              if (data && docSnap.id) {
+                next.set(docSnap.id, { ...data, id: docSnap.id });
+              }
+            });
+            publicMap = next;
+            emitMerged();
+          },
+          () => {}
+        );
+
+    const unsubUsers = onSnapshot(
       collection(db, 'users'),
       (snapshot) => {
-        const list: UserAccount[] = [];
+        const next = new Map<string, UserAccount>();
         snapshot.forEach((docSnap) => {
           const data = docSnap.data() as UserAccount;
-          list.push({ ...data, id: docSnap.id });
+          if (data && docSnap.id) {
+            next.set(docSnap.id, { ...data, id: docSnap.id });
+          }
         });
-        mergeAndEmit(list);
+        legacyMap = next;
+        emitMerged();
       },
       () => {
-        mergeAndEmit([]);
+        onUpdate(
+          sortUsers(
+            getAllUsersFromDb().map((u) => sanitizeUserForClient(u, includePrivatePii))
+          )
+        );
       }
     );
+
+    return () => {
+      unsubPublic();
+      unsubUsers();
+    };
   } catch {
-    mergeAndEmit([]);
+    onUpdate(
+      sortUsers(getAllUsersFromDb().map((u) => sanitizeUserForClient(u, includePrivatePii)))
+    );
     return () => {};
   }
 }
@@ -147,39 +226,45 @@ export async function adminCreateUser(params: {
   const cleanEmail = normalizeEmail(params.email);
   const nowDate = new Date().toISOString().split('T')[0];
   const nowIso = new Date().toISOString();
-  const id = `usr-${Date.now()}`;
+  const id = `usr-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   const cleanCity = (params.city || 'Jakarta Selatan').trim().slice(0, 80);
   const cleanName = params.name.trim().slice(0, 80);
+
+  const hashedPassword = params.password
+    ? (await hashPassword(params.password)).slice(0, 200)
+    : '';
+
+  const safeBuyerProfile = sanitizeBuyerProfile({
+    city: cleanCity,
+    address: (params.address || '').trim(),
+    postalCode: (params.postalCode || '').trim(),
+    totalOrdersCount: 0,
+  });
+
+  const safeSellerProfile = sanitizeSellerProfile({
+    brandName: (params.brandName || cleanName).trim().slice(0, 80),
+    brandCity: cleanCity,
+    planId: 'starter',
+    registeredAt: nowDate,
+    verifiedBrand: true,
+  });
 
   const account: UserAccount = {
     id,
     name: cleanName,
-    email: cleanEmail,
+    email: cleanEmail.slice(0, 120),
     phone: (params.phone || '').trim().slice(0, 30),
-    password: params.password,
+    password: hashedPassword,
     roles: params.roles && params.roles.length > 0 ? params.roles : ['buyer', 'seller'],
     activeRole: 'buyer',
     accountStatus: params.accountStatus || 'active',
     statusReason: '',
     statusUpdatedAt: nowIso,
-    buyerProfile: {
-      city: cleanCity,
-      address: (params.address || '').trim(),
-      postalCode: (params.postalCode || '').trim(),
-      totalOrdersCount: 0,
-    },
-    sellerProfile: {
-      brandName: (params.brandName || cleanName).trim().slice(0, 80),
-      brandCity: cleanCity,
-      planId: 'starter',
-      registeredAt: nowDate,
-      verifiedBrand: true,
-    },
+    buyerProfile: safeBuyerProfile,
+    sellerProfile: safeSellerProfile,
     createdAt: nowDate,
     updatedAt: nowIso,
   };
-
-  saveUserToDb(account);
 
   if (cleanEmail) {
     try {
@@ -216,6 +301,9 @@ export async function adminCreateUser(params: {
     { merge: true }
   );
 
+  void syncPublicProfileToFirestore(account);
+  saveUserToDb(sanitizeUserForClient(account, false));
+
   return account;
 }
 
@@ -245,37 +333,46 @@ export async function adminUpdateUser(
   const nextName = (updates.name ?? user.name).trim().slice(0, 80);
   const nextEmail = normalizeEmail(updates.email ?? user.email ?? '');
 
+  const nextPassword =
+    updates.password !== undefined
+      ? updates.password
+        ? (await hashPassword(updates.password)).slice(0, 200)
+        : ''
+      : user.password || '';
+
+  const safeBuyerProfile = sanitizeBuyerProfile({
+    ...(user.buyerProfile || {}),
+    city: nextCity,
+    ...(updates.address !== undefined ? { address: updates.address.trim() } : {}),
+  });
+
+  const safeSellerProfile = sanitizeSellerProfile({
+    brandName: (updates.brandName ?? user.sellerProfile?.brandName ?? nextName).trim(),
+    brandCity: nextCity,
+    planId: user.sellerProfile?.planId || 'starter',
+    registeredAt: user.sellerProfile?.registeredAt || user.createdAt || nowIso.split('T')[0],
+    verifiedBrand: user.sellerProfile?.verifiedBrand ?? true,
+    ...(user.sellerProfile?.brandDescription
+      ? { brandDescription: user.sellerProfile.brandDescription }
+      : {}),
+  });
+
   const updated: UserAccount = {
     ...user,
     name: nextName,
     email: nextEmail,
     phone: (updates.phone ?? user.phone ?? '').trim().slice(0, 30),
-    password: updates.password !== undefined ? updates.password : user.password,
+    password: nextPassword,
     accountStatus: updates.accountStatus ?? user.accountStatus ?? 'active',
     statusReason:
       updates.statusReason !== undefined
         ? updates.statusReason.slice(0, 300)
         : user.statusReason || '',
     statusUpdatedAt: updates.accountStatus ? nowIso : user.statusUpdatedAt || nowIso,
-    buyerProfile: {
-      ...(user.buyerProfile || {}),
-      city: nextCity,
-      ...(updates.address !== undefined ? { address: updates.address.trim() } : {}),
-    },
-    sellerProfile: {
-      brandName: (updates.brandName ?? user.sellerProfile?.brandName ?? nextName).trim(),
-      brandCity: nextCity,
-      planId: user.sellerProfile?.planId || 'starter',
-      registeredAt: user.sellerProfile?.registeredAt || user.createdAt || nowIso.split('T')[0],
-      verifiedBrand: user.sellerProfile?.verifiedBrand ?? true,
-      ...(user.sellerProfile?.brandDescription
-        ? { brandDescription: user.sellerProfile.brandDescription }
-        : {}),
-    },
+    buyerProfile: safeBuyerProfile,
+    sellerProfile: safeSellerProfile,
     updatedAt: nowIso,
   };
-
-  saveUserToDb(updated);
 
   await setDoc(
     doc(db, 'users', updated.id),
@@ -290,8 +387,8 @@ export async function adminUpdateUser(
       roles: updated.roles || ['buyer', 'seller'],
       activeRole: updated.activeRole || 'buyer',
       phoneVerified: Boolean(updated.phone),
-      buyerProfile: updated.buyerProfile || null,
-      sellerProfile: updated.sellerProfile || null,
+      buyerProfile: safeBuyerProfile || null,
+      sellerProfile: safeSellerProfile || null,
       accountStatus: updated.accountStatus || 'active',
       statusReason: updated.statusReason || '',
       statusUpdatedAt: updated.statusUpdatedAt || nowIso,
@@ -300,6 +397,9 @@ export async function adminUpdateUser(
     },
     { merge: true }
   );
+
+  void syncPublicProfileToFirestore(updated);
+  saveUserToDb(sanitizeUserForClient(updated, false));
 
   return updated;
 }
@@ -361,4 +461,8 @@ export async function adminDeleteUser(
   } catch (err) {
     console.warn('Firestore user delete warning:', err);
   }
+
+  try {
+    await deleteDoc(doc(db, 'public_profiles', userId));
+  } catch {}
 }
